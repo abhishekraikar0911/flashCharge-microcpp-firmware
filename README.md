@@ -1,4 +1,4 @@
-# MicroOCPP EV Charger Controller
+# flashCharge MicroOCPP Firmware
 
 An ESP32-based OCPP 1.6 compliant electric vehicle charger controller implementing communication with BMS (Battery Management System), charger hardware, and central management system.
 
