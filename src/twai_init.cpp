@@ -5,6 +5,10 @@
 
 // ====== Global State Variables (Definitions) ======
 
+// 0. Synchronization
+SemaphoreHandle_t dataMutex = nullptr;
+SemaphoreHandle_t serialMutex = nullptr;
+
 // 1. Energy & Time
 float energyWh = 0.0f;
 unsigned long lastHeartbeat = 0;
@@ -13,6 +17,9 @@ unsigned long lastHeartbeat = 0;
 bool batteryConnected = false;
 bool chargingEnabled = false;
 bool chargingswitch = false;
+
+// OCPP initialization status
+bool ocppInitialized = false;
 
 // 3. Vehicle Detection Globals
 String vehicleModel = "Unknown";
@@ -24,6 +31,9 @@ float BMS_Vmax = 0.0f, BMS_Imax = 0.0f;
 float Charger_Vmax = 0.0f, Charger_Imax = 0.0f;
 float chargerVolt = 0.0f, chargerCurr = 0.0f, chargerTemp = 0.0f, terminalchargerPower = 0.0f;
 float terminalVolt = 0.0f, terminalCurr = 0.0f;
+float socPercent = 0.0f;
+// float batteryAh = 0.0f; // Defined in bms_mcu.cpp
+// float batterySoc = 0.0f; // Defined in bms_mcu.cpp
 
 // 5. Metrics
 uint16_t metric79_raw = 0;
@@ -95,32 +105,58 @@ void pushFrame(const twai_message_t &msg)
 // ====== TWAI Initialization ======
 void twai_init()
 {
-    // Use TX=21, RX=22 default pins
-    twai_general_config_t gcfg = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_21, GPIO_NUM_22, TWAI_MODE_NORMAL);
-    gcfg.rx_queue_len = 64;
-    gcfg.tx_queue_len = 16;
-
-    twai_timing_config_t tcfg = TWAI_TIMING_CONFIG_250KBITS();
-    twai_filter_config_t fcfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-
-    if (twai_driver_install(&gcfg, &tcfg, &fcfg) != ESP_OK)
+    // Initialize semaphores if not already done
+    if (dataMutex == nullptr)
     {
-        Serial.println("❌ TWAI driver install failed");
-        while (true)
-        {
-            delay(1000);
-        }
+        dataMutex = xSemaphoreCreateMutex();
+    }
+    if (serialMutex == nullptr)
+    {
+        serialMutex = xSemaphoreCreateMutex();
     }
 
-    if (twai_start() != ESP_OK)
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
-        Serial.println("❌ TWAI start failed");
-        while (true)
+        Serial.println("🔧 Initializing CAN bus...");
+
+        // Use TX=21, RX=22 default pins
+        twai_general_config_t gcfg = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_21, GPIO_NUM_22, TWAI_MODE_NORMAL);
+        gcfg.rx_queue_len = 64;
+        gcfg.tx_queue_len = 16;
+
+        twai_timing_config_t tcfg = TWAI_TIMING_CONFIG_250KBITS();
+        twai_filter_config_t fcfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+        Serial.println("📡 CAN Config:");
+        Serial.println("  - Mode: Normal");
+        Serial.println("  - Baud: 250 kbps");
+        Serial.println("  - TX Pin: 21, RX Pin: 22");
+        Serial.println("  - Filter: Accept All");
+
+        if (twai_driver_install(&gcfg, &tcfg, &fcfg) != ESP_OK)
         {
-            delay(1000);
+            Serial.println("❌ TWAI driver install failed");
+            xSemaphoreGive(serialMutex);
+            while (true)
+            {
+                delay(1000);
+            }
         }
+
+        if (twai_start() != ESP_OK)
+        {
+            Serial.println("❌ TWAI start failed");
+            xSemaphoreGive(serialMutex);
+            while (true)
+            {
+                delay(1000);
+            }
+        }
+
+        Serial.println("✅ TWAI started at 250 kbps");
+        Serial.println("🔍 Monitoring CAN bus health...");
+        xSemaphoreGive(serialMutex);
     }
-    Serial.println("✅ TWAI started at 250 kbps");
 
     lastChargerResponse = millis();
 }

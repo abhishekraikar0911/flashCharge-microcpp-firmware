@@ -2,6 +2,10 @@
 #include <Arduino.h>
 #include <math.h>
 
+// SOC related
+float batteryAh = 0.0f;
+float batterySoc = 0.0f; // 0–100 %
+
 // ====== Build status flags for 0x18FF50E5 ======
 static uint8_t buildStatusFlags()
 {
@@ -27,11 +31,10 @@ void handleBMSMessage(const twai_message_t &msg)
     if ((msg.identifier & 0x1FFFFFFFUL) != (ID_BMS_REQUEST & 0x1FFFFFFFUL))
         return;
 
-    Serial.println("BMS message received");
+    // Serial.println("BMS message received");
 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE)
     {
-        gunPhysicallyConnected = true;
         batteryConnected = true;
         lastBMS = millis();
 
@@ -52,7 +55,6 @@ void handleBMSMessage(const twai_message_t &msg)
         if (BMS_Vmax > 56.0f && BMS_Vmax < 85.5f)
         {
             batteryConnected = true;
-            gunPhysicallyConnected = true;
             lastBMS = millis();
         }
         xSemaphoreGive(dataMutex);
@@ -92,4 +94,66 @@ void sendChargerFeedback()
 
     esp_err_t res = twai_transmit(&tx, pdMS_TO_TICKS(20));
     // printChargerFeedback(chargerVolt, chargerCurr, tx.data[4], res);
+}
+
+void requestSOCFromBMS()
+{
+    twai_message_t tx = {};
+    tx.identifier = ID_SOC_REQUEST & 0x1FFFFFFFUL;
+    tx.extd = 1;
+    tx.rtr = 0;
+    tx.data_length_code = 8;
+
+    memset(tx.data, 0x00, 8);
+
+    esp_err_t res = twai_transmit(&tx, pdMS_TO_TICKS(20));
+    // Optional debug
+    // Serial.printf("SOC request sent, res=%d\n", res);
+}
+
+void handleSOCMessage(const twai_message_t &msg)
+{
+    if (!msg.extd)
+        return;
+
+    if ((msg.identifier & 0x1FFFFFFFUL) != (ID_SOC_RESPONSE & 0x1FFFFFFFUL))
+        return;
+
+    if (msg.data_length_code < 4)
+        return;
+
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE)
+    {
+        // Bytes 2 & 3 contain Ah value
+        uint16_t ah_raw = (uint16_t(msg.data[2]) << 8) | msg.data[3];
+
+        // Convert to Ah
+        batteryAh = ah_raw * 0.001f;
+
+        // Clamp Ah to 0–30 range
+        if (batteryAh < 0.0f)
+            batteryAh = 0.0f;
+        if (batteryAh > 30.0f)
+            batteryAh = 30.0f;
+
+        // Calculate SOC
+        batterySoc = (batteryAh / 30.0f) * 100.0f;
+
+        // Clamp SOC
+        if (batterySoc < 0.0f)
+            batterySoc = 0.0f;
+        if (batterySoc > 100.0f)
+            batterySoc = 100.0f;
+
+        // Update global socPercent
+        socPercent = batterySoc;
+
+        // Set battery connected when SOC is available
+        if (socPercent > 0.0f)
+        {
+            batteryConnected = true;
+        }
+
+        xSemaphoreGive(dataMutex);
+    }
 }

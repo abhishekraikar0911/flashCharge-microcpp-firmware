@@ -97,7 +97,7 @@ void printDecodedData()
         return;
     }
 
-    printMenu();
+    // printMenu();
 
     if (userChoice == 1)
     {
@@ -197,7 +197,11 @@ void processSerialInput()
         break;
     case 's':
     case 'S':
-        if (!batteryConnected)
+        if (!ocppInitialized)
+        {
+            Serial.println("\n⛔ Cannot start charging: OCPP not initialized.");
+        }
+        else if (!batteryConnected)
         {
             Serial.println("\n⛔ Cannot start charging: No vehicle detected.");
         }
@@ -207,28 +211,24 @@ void processSerialInput()
         }
         else
         {
-            if (!isTransactionRunning(1) && !sessionActive)
-            {
-                beginTransaction_authorized("TEST_TAG", nullptr, 1);
-                Serial.println("OCPP Transaction started");
-                sessionActive = true;
-            }
-            chargingEnabled = true;
-            updateCAN = true;
-            lastChargerResponse = millis();
-            printChargingState(true);
+            // Removed: charging control now handled by OCPP RemoteStart
+            Serial.println("🔌 EV connected and ready - Charging will start via OCPP RemoteStart from SteVe");
         }
         break;
     case 't':
     case 'T':
-        chargingEnabled = false;
-        if (isTransactionRunning(1))
+        if (isTransactionRunning(1) && ocppInitialized)
         {
             endTransaction();
-            Serial.println("OCPP Transaction stopped");
+            Serial.println("OCPP StopTransaction requested");
+            // Removed: chargingEnabled = false; // Now handled by OCPP
             sessionActive = false;
         }
-        printChargingState(false);
+        else if (!ocppInitialized)
+        {
+            Serial.println("❌ Cannot stop transaction: OCPP not initialized");
+        }
+        // printChargingState(false); // Remove this, status will be set by OCPP
         break;
     default:
         break;
