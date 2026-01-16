@@ -3,10 +3,13 @@
 #include <string.h>
 
 // Toggle OCPP telemetry here (set to 1 to enable, 0 to disable)
-#define ENABLE_OCPP_TELEMETRY 1
+#define ENABLE_OCPP_TELEMETRY 0
 #if ENABLE_OCPP_TELEMETRY
-#include "ocpp/ocpp_client.h"
+#include "ocpp/csms_communication.h"
 #endif
+
+// Response watchdog
+static unsigned long lastResp = 0;
 
 // Big-endian float helper (assumes payload stores MSB first)
 static inline float beFloat(const uint8_t *b)
@@ -99,6 +102,9 @@ static void decode_0681817E(const twai_message_t &msg)
         }
         xSemaphoreGive(dataMutex);
     }
+    // Update response watchdog
+    lastResp = millis();
+    // Serial.println("📥 Control response received");
 }
 
 static void decode_0681827E(const twai_message_t &msg)
@@ -148,6 +154,9 @@ static void decode_0681827E(const twai_message_t &msg)
         }
         xSemaphoreGive(dataMutex);
     }
+    // Update response watchdog
+    lastResp = millis();
+    // Serial.println("📥 Telemetry response received");
 }
 
 static void decode_00433F01(const twai_message_t &msg)
@@ -232,6 +241,8 @@ void sendGroupRequest(Group &g)
     tx.data[0] = 0x01; // command class
     tx.data[1] = func;
 
+    static bool lastEnabled = false;
+
     if (func == 0x32)
     {
         bool enabled = false;
@@ -240,12 +251,26 @@ void sendGroupRequest(Group &g)
             enabled = chargingEnabled && gunPhysicallyConnected && batteryConnected;
             xSemaphoreGive(dataMutex);
         }
+
+        if (enabled == lastEnabled)
+            return; // 🔴 DO NOT RESEND
+
+        lastEnabled = enabled;
         tx.data[2] = 0x00;
         tx.data[3] = enabled ? 0x00 : 0x01;
     }
     else if (func == 0x00 || func == 0x03)
     {
-        // Always broadcast Vmax/Imax, even if charging disabled
+        // Send Vmax/Imax only when enabled
+        bool enabled = false;
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+        {
+            enabled = chargingEnabled;
+            xSemaphoreGive(dataMutex);
+        }
+        if (!enabled)
+            return; // Do not send limits when disabled
+
         uint32_t raw = (func == 0x00) ? cachedRawV : cachedRawI;
         tx.data[4] = (raw >> 24) & 0xFF;
         tx.data[5] = (raw >> 16) & 0xFF;
@@ -262,15 +287,34 @@ void chargerCommTask(void *arg)
 {
     static unsigned long lastFeedback = 0;
     static unsigned long lastEnergyTick = 0;
+    static unsigned long lastSOCRequest = 0;
+    static unsigned long lastGroupRequest = 0; // Add timing control
 
     while (true)
     {
-        // Send all group requests
-        for (uint8_t i = 0; i < NUM_GROUPS; i++)
+        // Send group requests with proper spacing (every 500ms instead of every loop)
+        if (millis() - lastGroupRequest >= 500)
         {
-            sendGroupRequest(groups[i]);
+            sendGroupRequest(groups[0]); // control
+            vTaskDelay(pdMS_TO_TICKS(50));
+            sendGroupRequest(groups[1]); // telemetry
+            vTaskDelay(pdMS_TO_TICKS(50));
+            lastGroupRequest = millis();
         }
-        sendChargerFeedback();
+
+        // Send charger feedback more frequently (every 100ms)
+        if (millis() - lastFeedback >= 100)
+        {
+            sendChargerFeedback();
+            lastFeedback = millis();
+        }
+
+        // Request SOC periodically (every 2 seconds)
+        if (millis() - lastSOCRequest >= 2000)
+        {
+            requestSOCFromBMS();
+            lastSOCRequest = millis();
+        }
 
         // 4. Drain RX queue and dispatch
         RxBufItem item;
@@ -286,6 +330,10 @@ void chargerCommTask(void *arg)
             if ((msg.identifier & 0x1FFFFFFFUL) == (ID_BMS_REQUEST & 0x1FFFFFFFUL))
             {
                 handleBMSMessage(msg);
+            }
+            else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_SOC_RESPONSE & 0x1FFFFFFFUL))
+            {
+                handleSOCMessage(msg);
             }
             else
             {
@@ -318,9 +366,50 @@ void chargerCommTask(void *arg)
         twai_status_info_t s;
         if (twai_get_status_info(&s) == ESP_OK)
         {
+            static unsigned long lastBusStatus = 0;
+            if (millis() - lastBusStatus >= 10000) // Report every 10 seconds
+            {
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    Serial.print("📊 CAN Status: State=");
+                    switch (s.state)
+                    {
+                    case TWAI_STATE_STOPPED:
+                        Serial.print("STOPPED");
+                        break;
+                    case TWAI_STATE_BUS_OFF:
+                        Serial.print("BUS_OFF");
+                        break;
+                    case TWAI_STATE_RECOVERING:
+                        Serial.print("RECOVERING");
+                        break;
+                    case TWAI_STATE_RUNNING:
+                        Serial.print("RUNNING");
+                        break;
+                    default:
+                        Serial.print("UNKNOWN");
+                        break;
+                    }
+                    Serial.print(", TX_Err=");
+                    Serial.print(s.tx_error_counter);
+                    Serial.print(", RX_Err=");
+                    Serial.print(s.rx_error_counter);
+                    Serial.print(", TX_Q=");
+                    Serial.print(s.msgs_to_tx);
+                    Serial.print(", RX_Q=");
+                    Serial.println(s.msgs_to_rx);
+                    xSemaphoreGive(serialMutex);
+                }
+                lastBusStatus = millis();
+            }
+
             if (s.state == TWAI_STATE_BUS_OFF || s.state == TWAI_STATE_STOPPED)
             {
-                Serial.println("⚠ TWAI bus-off detected, recovering...");
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    Serial.println("⚠ TWAI bus-off detected, recovering...");
+                    xSemaphoreGive(serialMutex);
+                }
                 twai_stop();
                 twai_driver_uninstall();
                 vTaskDelay(pdMS_TO_TICKS(100));

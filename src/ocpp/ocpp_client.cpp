@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <MicroOcpp.h>
+#include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
 
 #include "ocpp_client.h"
@@ -16,6 +17,7 @@ extern float chargerVolt;
 extern float chargerCurr;
 extern bool sessionActive;
 extern bool batteryConnected;
+extern float socPercent;
 
 static TaskHandle_t ocppTaskHandle = nullptr;
 
@@ -29,20 +31,35 @@ static void ocppTask(void *arg)
     }
 
     // Construct OCPP URL
-    String url = "ws://" + String(SECRET_CSMS_HOST) + ":" + String(SECRET_CSMS_PORT) + SECRET_CSMS_URL;
+    String url = SECRET_CSMS_URL;
 
     // Initialize MicroOCPP
     mocpp_initialize(url.c_str(), "RIVOT_100A_01", "Rivot Charger", "Rivot Motors");
+
+    // Configure MeterValues to send every 10 seconds instead of default 60
+    if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval"))
+    {
+        config->setInt(10);
+    }
+    // Ensure we sample Energy, Power, and SoC
+    if (auto config = MicroOcpp::getConfigurationPublic("MeterValuesSampledData"))
+    {
+        config->setString("Energy.Active.Import.Register,Power.Active.Import,SoC");
+    }
 
     // Map existing firmware state into MicroOCPP inputs (connector 1)
     setConnectorPluggedInput([]()
                              { return gunPhysicallyConnected; }, 1);
     setEvseReadyInput([]()
-                      { return chargingEnabled; }, 1);
+                      { return batteryConnected && gunPhysicallyConnected; }, 1);
     setEnergyMeterInput([]()
                         { return energyWh; }, 1); // in Wh
     setPowerMeterInput([]()
                        { return chargerVolt * chargerCurr; }, 1); // in W
+
+    // Add SOC MeterValue
+    addMeterValueInput([]()
+                       { return socPercent; }, "SoC", "Percent", nullptr, nullptr, 1);
 
     // Handle remote start/stop by setting chargingEnabled
     setTxNotificationOutput([](MicroOcpp::Transaction *tx, TxNotification notification)
@@ -58,6 +75,16 @@ static void ocppTask(void *arg)
     // Main OCPP loop
     while (true)
     {
+        // Check WiFi connection and reconnect if needed
+        if (WiFi.status() != WL_CONNECTED)
+        {
+            WiFi.reconnect();
+            while (WiFi.status() != WL_CONNECTED)
+            {
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+        }
+
         mocpp_loop();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
