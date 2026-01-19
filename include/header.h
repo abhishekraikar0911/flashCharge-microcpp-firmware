@@ -84,6 +84,7 @@ extern uint32_t cachedRawI;
 // =========================================================
 // STRUCTURES
 // =========================================================
+// Legacy RxBufItem for backward compatibility with existing code
 struct RxBufItem
 {
     uint32_t id;
@@ -113,6 +114,7 @@ extern Group groups[];
 // =========================================================
 // FUNCTION PROTOTYPES
 // =========================================================
+void initGlobals();
 void twai_init();
 void can_rx_task(void *arg);
 void chargerCommTask(void *arg);
