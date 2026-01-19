@@ -92,7 +92,7 @@ void sendChargerFeedback()
     tx.data[6] = 0x00;
     tx.data[7] = 0x00;
 
-    esp_err_t res = twai_transmit(&tx, pdMS_TO_TICKS(20));
+    (void)twai_transmit(&tx, pdMS_TO_TICKS(20));
     // printChargerFeedback(chargerVolt, chargerCurr, tx.data[4], res);
 }
 
@@ -106,7 +106,7 @@ void requestSOCFromBMS()
 
     memset(tx.data, 0x00, 8);
 
-    esp_err_t res = twai_transmit(&tx, pdMS_TO_TICKS(20));
+    (void)twai_transmit(&tx, pdMS_TO_TICKS(20));
     // Optional debug
     // Serial.printf("SOC request sent, res=%d\n", res);
 }

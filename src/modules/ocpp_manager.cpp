@@ -5,8 +5,8 @@
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
 
-#include "ocpp_client.h"
-#include "secrets.h"
+#include "../include/ocpp/ocpp_client.h"
+#include "../../include/secrets.h"
 
 // These globals are defined in the main firmware (e.g. src/main.cpp).
 // We declare them as extern so this translation unit can read/write them.
