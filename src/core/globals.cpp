@@ -28,6 +28,8 @@ float terminalchargerPower = 0.0f;
 float terminalVolt = 0.0f;
 float terminalCurr = 0.0f;
 float socPercent = 0.0f;
+float rangeKm = 0.0f;
+uint8_t vehicleModel = 0;  // 0=Unknown, 1=Classic, 2=Pro, 3=Max
 
 uint16_t metric79_raw = 0;
 float metric79_scaled = 0.0f;
@@ -38,6 +40,9 @@ unsigned long lastBMS = 0;
 uint8_t heating = 0;
 unsigned long lastHeartbeat = 0;
 unsigned long lastChargerResponse = 0;
+unsigned long lastTerminalPower = 0;  // NEW: Track terminal power CAN messages
+unsigned long lastTerminalStatus = 0; // NEW: Track terminal status CAN messages
+bool chargerModuleOnline = false;     // NEW: Charger module health status
 
 const char *chargerStatus = "UNKNOWN";
 const char *terminalchargerStatus = "UNKNOWN";
@@ -73,6 +78,22 @@ volatile bool updateCAN = false;
 // Initialize mutexes in setup
 void initGlobals()
 {
-    dataMutex = xSemaphoreCreateMutex();
-    serialMutex = xSemaphoreCreateMutex();
+    // FIX: Check if mutexes already created to prevent memory leak
+    if (dataMutex == nullptr)
+    {
+        dataMutex = xSemaphoreCreateMutex();
+        if (dataMutex == nullptr)
+        {
+            Serial.println("[CRITICAL] Failed to create dataMutex!");
+        }
+    }
+    
+    if (serialMutex == nullptr)
+    {
+        serialMutex = xSemaphoreCreateMutex();
+        if (serialMutex == nullptr)
+        {
+            Serial.println("[CRITICAL] Failed to create serialMutex!");
+        }
+    }
 }

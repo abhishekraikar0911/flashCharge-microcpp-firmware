@@ -2,6 +2,7 @@
 #include "../include/production_config.h"
 #include "../include/health_monitor.h"
 #include "../include/header.h"
+#include "../include/ocpp/ocpp_client.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
@@ -43,6 +44,34 @@ namespace prod
     void OCPPStateMachine::poll()
     {
         uint32_t now = millis();
+
+        // CRITICAL: Check charger module health and update OCPP status
+        static unsigned long lastHealthCheck = 0;
+        if (now - lastHealthCheck >= 2000) // Check every 2 seconds
+        {
+            bool chargerHealthy = isChargerModuleHealthy();
+            
+            // If charger goes offline, send Faulted status
+            if (!chargerHealthy && currentState != ConnectorState::Faulted)
+            {
+                Serial.println("[OCPP_SM] ❌ Charger module offline - sending Faulted status");
+                forceState(ConnectorState::Faulted);
+                
+                // CRITICAL: Tell MicroOcpp to send Faulted status
+                ocpp::notifyChargerFault(true);
+            }
+            // If charger comes back online and we're in Faulted state, recover
+            else if (chargerHealthy && currentState == ConnectorState::Faulted)
+            {
+                Serial.println("[OCPP_SM] ✅ Charger module recovered - sending Available status");
+                forceState(ConnectorState::Available);
+                
+                // CRITICAL: Tell MicroOcpp fault is cleared
+                ocpp::notifyChargerFault(false);
+            }
+            
+            lastHealthCheck = now;
+        }
 
         // Check for plug status changes (debounced)
         if (now - lastPlugCheckTime > PLUG_DEBOUNCE_MS)
@@ -104,6 +133,14 @@ namespace prod
     bool OCPPStateMachine::onRemoteStartTransaction(const char *idTag, int connectorId)
     {
         Serial.printf("[OCPP_SM] 📥 RemoteStartTransaction: %s (connector %d)\n", idTag, connectorId);
+
+        // CRITICAL: Check charger module health FIRST
+        if (!isChargerModuleHealthy())
+        {
+            Serial.println("[OCPP_SM] ❌ Charger module OFFLINE - cannot start transaction");
+            Serial.println("[OCPP_SM] ⚠️  Please check: Charger PCB power, CAN bus connection");
+            return false;
+        }
 
         // Validation checks before accepting
         if (!isHardwareSafe())

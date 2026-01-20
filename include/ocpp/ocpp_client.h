@@ -29,6 +29,11 @@ namespace ocpp
      */
     bool isConnected();
 
+    /**
+     * Notify OCPP of charger fault state
+     */
+    void notifyChargerFault(bool faulted);
+
 } // namespace ocpp
 
 #endif // OCPP_CLIENT_H

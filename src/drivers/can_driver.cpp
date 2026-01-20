@@ -178,7 +178,7 @@ void can_rx_task(void *arg)
         esp_err_t err = twai_receive(&msg, pdMS_TO_TICKS(1000));
         if (err == ESP_OK)
         {
-            // Store in ring buffer
+            // FIX: Check buffer overflow before writing
             uint16_t nextHead = (rxHead + 1) % RX_BUFFER_SIZE;
             if (nextHead != rxTail)
             {
@@ -187,6 +187,12 @@ void can_rx_task(void *arg)
                 rxHead = nextHead;
                 driverStatus.total_rx_messages++;
                 driverStatus.last_activity_ms = millis();
+            }
+            else
+            {
+                // Buffer full - drop oldest message
+                rxTail = (rxTail + 1) % RX_BUFFER_SIZE;
+                driverStatus.error_count++;
             }
             
             // Also push to legacy buffer for compatibility
