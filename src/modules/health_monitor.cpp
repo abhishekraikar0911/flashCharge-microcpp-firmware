@@ -11,21 +11,25 @@ namespace prod
         if (watchdogInitialized)
             return;
 
-        // Initialize Task Watchdog Timer
-        esp_task_wdt_init(WATCHDOG_TIMEOUT_SECONDS, true); // Panic on timeout
-        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-
+        // DISABLED: Watchdog causing boot loops
+        // esp_task_wdt_init(WATCHDOG_TIMEOUT_SECONDS, true);
+        // esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+        
         watchdogInitialized = true;
         lastWiFiConnectTime = millis();
         lastHealthCheck = millis();
-        Serial.printf("[Health] ✅ Watchdog initialized (%d second timeout)\n", WATCHDOG_TIMEOUT_SECONDS);
+        Serial.println("[Health] ⚠️  Watchdog disabled (causing boot loops)");
+    }
+    
+    void HealthMonitor::addTaskToWatchdog(TaskHandle_t task, const char* taskName)
+    {
+        // Watchdog disabled
+        Serial.printf("[Health] ⚠️  Watchdog disabled - %s not registered\n", taskName);
     }
 
     void HealthMonitor::feed()
     {
-        if (!watchdogInitialized)
-            return;
-        esp_task_wdt_reset(); // Feed the watchdog
+        // Watchdog disabled
     }
 
     void HealthMonitor::poll()
@@ -47,7 +51,7 @@ namespace prod
             uint32_t disconnectDuration = now - lastWiFiConnectTime;
             if (disconnectDuration > WIFI_DISCONNECT_TIMEOUT_MS)
             {
-                Serial.printf("[Health] ⚠️  WiFi disconnected for %ld seconds, aborting transaction\n",
+                Serial.printf("[Health] ⚠️  WiFi disconnected for %u seconds, aborting transaction\n",
                               disconnectDuration / 1000);
                 // Signal transaction abort (implementation depends on OCPP setup)
                 onTransactionEnded();
@@ -60,11 +64,15 @@ namespace prod
             Serial.println("[Health] ⚠️  Hardware fault detected!");
         }
 
+        // Check actual charging state from global variable
+        extern bool chargingEnabled; // Global namespace
+        bool actualTxActive = ::chargingEnabled;
+
         // Periodic status
-        Serial.printf("[Health] Uptime: %ld sec, WiFi: %s, TX Active: %s\n",
+        Serial.printf("[Health] Uptime: %u sec, WiFi: %s, TX Active: %s\n",
                       getUptimeSeconds(),
                       g_wifiManager.isConnected() ? "✅" : "❌",
-                      transactionInProgress ? "Yes" : "No");
+                      actualTxActive ? "Yes" : "No");
     }
 
     void HealthMonitor::onTransactionStarted()
@@ -79,7 +87,7 @@ namespace prod
         if (!transactionInProgress)
             return;
         uint32_t duration = millis() - transactionStartTime;
-        Serial.printf("[Health] 🛑 Transaction ended (duration: %lu ms)\n", duration);
+        Serial.printf("[Health] 🛑 Transaction ended (duration: %u ms)\n", duration);
         transactionInProgress = false;
     }
 

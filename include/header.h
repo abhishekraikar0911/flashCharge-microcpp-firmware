@@ -41,6 +41,8 @@ extern float Charger_Vmax, Charger_Imax;
 extern float chargerVolt, chargerCurr, chargerTemp, terminalchargerPower;
 extern float terminalVolt, terminalCurr;
 extern float socPercent;
+extern float rangeKm;
+extern uint8_t vehicleModel;  // 0=Unknown, 1=Classic, 2=Pro, 3=Max
 extern float batteryAh;
 extern float batterySoc;
 
@@ -53,6 +55,8 @@ extern unsigned long lastBMS;
 extern uint8_t heating;
 extern unsigned long lastHeartbeat;
 extern unsigned long lastChargerResponse;
+extern unsigned long lastTerminalPower;  // NEW: Track terminal data CAN messages
+extern unsigned long lastTerminalStatus; // NEW: Track terminal status CAN messages
 
 extern const char *chargerStatus;
 extern const char *terminalchargerStatus;
@@ -112,8 +116,11 @@ extern volatile bool updateCAN;
 extern Group groups[];
 
 // =========================================================
-// FUNCTION PROTOTYPES
+// CHARGER HEALTH MONITORING
 // =========================================================
+extern bool chargerModuleOnline;  // NEW: Charger module communication status
+bool isChargerModuleHealthy();     // NEW: Check if charger is responding
+void notifyChargerFault(bool faulted); // NEW: Notify OCPP about charger fault
 void initGlobals();
 void twai_init();
 void can_rx_task(void *arg);

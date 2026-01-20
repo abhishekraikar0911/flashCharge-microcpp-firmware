@@ -37,6 +37,11 @@ namespace prod
          * Called once in setup()
          */
         void init();
+        
+        /**
+         * Add task to watchdog monitoring
+         */
+        void addTaskToWatchdog(TaskHandle_t task, const char* taskName);
 
         /**
          * Feed the watchdog (must be called regularly from OCPP loop)

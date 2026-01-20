@@ -126,18 +126,29 @@ void handleSOCMessage(const twai_message_t &msg)
     {
         // Bytes 2 & 3 contain Ah value
         uint16_t ah_raw = (uint16_t(msg.data[2]) << 8) | msg.data[3];
-
-        // Convert to Ah
         batteryAh = ah_raw * 0.001f;
 
-        // Clamp Ah to 0–30 range
+        // Auto-detect battery model using BMS_Imax
+        float maxCapacityAh;
+        if (BMS_Imax <= 30.0f) {
+            maxCapacityAh = 30.0f;  // NX-100 Classic
+            vehicleModel = 1;
+        } else if (BMS_Imax <= 60.0f) {
+            maxCapacityAh = 60.0f;  // NX-100 Pro
+            vehicleModel = 2;
+        } else {
+            maxCapacityAh = 90.0f;  // NX-100 Max
+            vehicleModel = 3;
+        }
+
+        // Clamp Ah to detected capacity range
         if (batteryAh < 0.0f)
             batteryAh = 0.0f;
-        if (batteryAh > 30.0f)
-            batteryAh = 30.0f;
+        if (batteryAh > maxCapacityAh)
+            batteryAh = maxCapacityAh;
 
-        // Calculate SOC
-        batterySoc = (batteryAh / 30.0f) * 100.0f;
+        // Calculate SOC based on detected model
+        batterySoc = (batteryAh / maxCapacityAh) * 100.0f;
 
         // Clamp SOC
         if (batterySoc < 0.0f)
@@ -145,10 +156,11 @@ void handleSOCMessage(const twai_message_t &msg)
         if (batterySoc > 100.0f)
             batterySoc = 100.0f;
 
-        // Update global socPercent
         socPercent = batterySoc;
 
-        // Set battery connected when SOC is available
+        // Calculate range: 1Ah = 2.7km (company tested)
+        rangeKm = batteryAh * 2.7f;
+
         if (socPercent > 0.0f)
         {
             batteryConnected = true;

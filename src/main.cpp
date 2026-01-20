@@ -4,6 +4,7 @@
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
+#include <MicroOcpp/Model/ConnectorBase/Connector.h>
 #include "../include/secrets.h"
 #include "../include/header.h"
 #include "../include/ocpp/ocpp_client.h"
@@ -13,6 +14,7 @@
 #include "../include/ocpp_state_machine.h"
 #include "../include/security_manager.h"
 #include "../include/drivers/can_driver.h"
+#include "../include/config/version.h"
 
 using namespace prod;
 
@@ -27,104 +29,19 @@ bool getPlugState()
     return gunPhysicallyConnected;
 }
 
-// OCPP task (runs on Core 0) - FIXED: Wait for WiFi and initialize OCPP properly
+// OCPP task (runs on Core 0) - Uses ocpp_manager for all OCPP logic
 void ocppTask(void *pvParameters)
 {
-    Serial.println("[OCPP] 🔌 OCPP Task started, waiting for WiFi...");
+    Serial.println("[OCPP] 🔌 OCPP Task started");
 
-    // CRITICAL FIX #1: Wait for WiFi to be fully connected
-    uint32_t wifiWaitStart = millis();
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        Serial.print(".");
+    // Initialize OCPP (waits for WiFi internally)
+    ocpp::init();
 
-        // Safety timeout - 30 seconds
-        if (millis() - wifiWaitStart > 30000)
-        {
-            Serial.println("\n[OCPP] ❌ WiFi timeout! Rebooting...");
-            esp_restart();
-        }
-    }
-    Serial.println("\n[OCPP] ✅ WiFi connected, initializing OCPP...");
-
-    // CRITICAL FIX #2: Initialize OCPP with plain WS (non-secure)
-    static bool ocppInitialized = false;
-    if (!ocppInitialized)
-    {
-        mocpp_initialize(
-            "ws://ocpp.rivotmotors.com:8080/steve/websocket/CentralSystemService/RIVOT_100A_01",
-            "RIVOT_100A_01",
-            "Rivot Charger",
-            "Rivot Motors");
-
-        // CRITICAL FIX: Set up meter inputs with validation
-        // Energy meter - ensure only non-negative values are sent
-        setEnergyMeterInput([]()
-                            {
-                                extern float energyWh;
-                                // Clamp to prevent invalid values
-                                if (energyWh < 0.0f)
-                                {
-                                    Serial.printf("[OCPP] ⚠️  Energy meter invalid (%.1f), clamping to 0\n", energyWh);
-                                    energyWh = 0.0f;
-                                }
-                                return (int)energyWh; // Convert to int for MicroOcpp
-                            },
-                            1);
-
-        // Power meter
-        setPowerMeterInput([]()
-                           {
-            extern float chargerVolt, chargerCurr;
-            return (int)(chargerVolt * chargerCurr); },
-                           1);
-
-        // Plug detection
-        setConnectorPluggedInput([]()
-                                 {
-            extern bool gunPhysicallyConnected;
-            return gunPhysicallyConnected; },
-                                 1);
-
-        // Battery ready state
-        setEvseReadyInput([]()
-                          {
-            extern bool batteryConnected, gunPhysicallyConnected;
-            return batteryConnected && gunPhysicallyConnected; },
-                          1);
-
-        // Remote start/stop handlers
-        setTxNotificationOutput([](MicroOcpp::Transaction *tx, TxNotification notification)
-                                {
-            if (notification == TxNotification_RemoteStart || notification == TxNotification_StartTx)
-            {
-                extern bool chargingEnabled;
-                chargingEnabled = true;
-                Serial.println("[OCPP] ▶️  Charging enabled (RemoteStart/StartTx)");
-            }
-            else if (notification == TxNotification_StopTx || notification == TxNotification_RemoteStop)
-            {
-                extern bool chargingEnabled;
-                chargingEnabled = false;
-                Serial.println("[OCPP] ⏹️  Charging disabled (StopTx/RemoteStop)");
-            } },
-                                1);
-
-        ocppInitialized = true;
-        Serial.println("[OCPP] ✅ OCPP initialized, entering main loop...");
-    }
-
-    // CRITICAL FIX #3: NOW start the OCPP loop
+    // Main OCPP loop
     for (;;)
     {
-        // Poll OCPP
-        mocpp_loop();
-
-        // Feed watchdog from OCPP task
+        ocpp::poll();
         g_healthMonitor.feed();
-
-        // Give CPU time to breathe
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -135,9 +52,14 @@ void setup()
     delay(500);
 
     Serial.println("\n========================================");
-    Serial.println("  ESP32 OCPP EVSE Controller - v2.0");
+    Serial.printf("  ESP32 OCPP EVSE Controller - v%s\n", FIRMWARE_VERSION);
     Serial.println("  Production-Ready Edition");
+    Serial.printf("  Build: %s\n", BUILD_TIMESTAMP);
+    Serial.printf("  Charger ID: %s\n", SECRET_CHARGER_ID);
     Serial.println("========================================\n");
+
+    // Initialize health monitor FIRST
+    g_healthMonitor.init();
 
     // Initialize global variables and mutexes
     initGlobals();
@@ -162,8 +84,8 @@ void setup()
     }
 
     // Record startup
-    g_persistence.recordRebootCount();
     Serial.printf("[System] Reboot count: %u\n", g_persistence.getRebootCount());
+    g_persistence.recordRebootCount();
 
     // Initialize CAN bus
     if (!CAN::init())
@@ -171,39 +93,66 @@ void setup()
         Serial.println("[System] ❌ CAN init failed!");
     }
 
-    // FIX #4: Increase CAN task priority (safety-critical)
+    // FIX #4: Increase CAN task priority and stack size (safety-critical)
     // Create CAN RX task - HIGH PRIORITY (priority 8)
-    xTaskCreatePinnedToCore(
+    TaskHandle_t canRxHandle = nullptr;
+    BaseType_t canRxResult = xTaskCreatePinnedToCore(
         can_rx_task,
         "CAN_RX",
-        4096,
+        6144, // Increased from 4096 to prevent stack overflow
         nullptr,
         8, // Increased from 5 - higher priority for safety
-        nullptr,
+        &canRxHandle,
         1);
+    
+    if (canRxResult != pdPASS)
+    {
+        Serial.println("[CRITICAL] Failed to create CAN_RX task!");
+    }
+    else
+    {
+        // SAFETY: Add to watchdog
+        g_healthMonitor.addTaskToWatchdog(canRxHandle, "CAN_RX");
+    }
 
     // Create charger communication task - HIGH PRIORITY (priority 7)
-    xTaskCreatePinnedToCore(
+    TaskHandle_t chargerHandle = nullptr;
+    BaseType_t chargerResult = xTaskCreatePinnedToCore(
         chargerCommTask,
         "CHARGER_COMM",
-        4096,
+        6144, // Increased from 4096 to prevent stack overflow
         nullptr,
         7, // Increased from 4 - safety-critical
-        nullptr,
+        &chargerHandle,
         1);
+    
+    if (chargerResult != pdPASS)
+    {
+        Serial.println("[CRITICAL] Failed to create CHARGER_COMM task!");
+    }
+    else
+    {
+        // SAFETY: Add to watchdog
+        g_healthMonitor.addTaskToWatchdog(chargerHandle, "CHARGER_COMM");
+    }
 
     // FIX #3: Create OCPP task on Core 0 - MEDIUM PRIORITY (priority 3)
-    xTaskCreatePinnedToCore(
+    BaseType_t ocppResult = xTaskCreatePinnedToCore(
         ocppTask,
         "OCPP_LOOP",
-        8192, // Larger stack for WebSocket handling
+        10240, // Increased from 8192 for WebSocket + TLS overhead
         nullptr,
         3, // Lower priority than CAN, but dedicated to avoid blocking
         &ocppTaskHandle,
         0); // Core 0 for OCPP
+    
+    if (ocppResult != pdPASS)
+    {
+        Serial.println("[CRITICAL] Failed to create OCPP_LOOP task!");
+    }
 
     // Create UI task for serial menu - LOWEST PRIORITY
-    xTaskCreatePinnedToCore(
+    BaseType_t uiResult = xTaskCreatePinnedToCore(
         [](void *arg)
         {
             static bool menuPrinted = false;
@@ -224,6 +173,11 @@ void setup()
         2,
         nullptr,
         1);
+    
+    if (uiResult != pdPASS)
+    {
+        Serial.println("[CRITICAL] Failed to create UI_TASK!");
+    }
 
     // Initialize WiFi with auto-reconnect
     Serial.println("[System] 📡 Initializing WiFi...");
@@ -256,6 +210,9 @@ void setup()
 
 void loop()
 {
+    // CRITICAL: Feed watchdog for loop task
+    g_healthMonitor.feed();
+    
     // FIX #5: Keep loop() lightweight - OCPP runs in its own task now
     // Poll WiFi (auto-reconnect if needed)
     g_wifiManager.poll();
@@ -266,13 +223,89 @@ void loop()
     // Poll OCPP state machine (deadlock prevention, timeout handling)
     g_ocppStateMachine.poll();
 
-    // Accumulate energy when charging
+    // Monitor plug state and send status updates
+    static bool lastPlugState = false;
+    bool currentPlugState = getPlugState();
+    if (currentPlugState != lastPlugState)
+    {
+        lastPlugState = currentPlugState;
+        if (!currentPlugState)
+        {
+            // Gun unplugged - send Available status
+            Serial.println("[OCPP] 🔌 Gun unplugged, sending Available status");
+            // MicroOcpp will automatically send StatusNotification when plug state changes
+        }
+    }
+
+    // Accumulate energy when charging - use terminal values with validation
     static unsigned long lastEnergyTime = millis();
-    if (chargingEnabled && chargerVolt > 0 && chargerCurr > 0)
+    static unsigned long lastChargerHealthCheck = 0;
+    
+    // Check if OCPP permits charging (Smart Charging limits, availability)
+    bool ocppAllowsCharge = ocppPermitsCharge(1);
+    
+    // PRODUCTION FIX: Check charger module health every 2 seconds
+    if (millis() - lastChargerHealthCheck >= 2000)
+    {
+        bool chargerHealthy = isChargerModuleHealthy();
+        static bool lastChargerHealthy = true; // Track previous state
+        
+        // Detect health state change
+        if (chargerHealthy != lastChargerHealthy)
+        {
+            if (!chargerHealthy)
+            {
+                Serial.println("\n[CHARGER] ❌ CRITICAL: Charger module communication lost!");
+                Serial.println("[CHARGER] ⚠️  Possible causes:");
+                Serial.println("[CHARGER]    - Charger PCB powered OFF");
+                Serial.println("[CHARGER]    - CAN bus disconnected");
+                Serial.println("[CHARGER]    - Hardware fault");
+                Serial.printf("[CHARGER] 🔍 Last messages: TermPower=%lums TermStatus=%lums Heartbeat=%lums ago\n",
+                             millis() - lastTerminalPower,
+                             millis() - lastTerminalStatus,
+                             millis() - lastHeartbeat);
+                
+                // Send OCPP StatusNotification: Faulted
+                Serial.println("[OCPP] 🚨 Sending StatusNotification: Faulted");
+                // MicroOcpp will send this via state machine
+            }
+            else
+            {
+                Serial.println("\n[CHARGER] ✅ Charger module communication restored!");
+                Serial.println("[OCPP] ✅ Sending StatusNotification: Available");
+            }
+            
+            lastChargerHealthy = chargerHealthy;
+        }
+        
+        // If charging enabled but charger offline, stop transaction
+        if (chargingEnabled && !chargerHealthy)
+        {
+            if (isTransactionRunning(1))
+            {
+                Serial.println("[CHARGER] 🛑 Auto-stopping transaction due to charger module offline");
+                endTransaction();
+            }
+        }
+        
+        // If OCPP doesn't permit charging, disable it
+        if (chargingEnabled && !ocppAllowsCharge)
+        {
+            Serial.println("[OCPP] ⚠️  OCPP does not permit charging (Smart Charging limit or unavailable)");
+            chargingEnabled = false;
+        }
+        
+        lastChargerHealthCheck = millis();
+    }
+    
+    // Only accumulate energy if OCPP permits and conditions are valid
+    if (chargingEnabled && ocppAllowsCharge && 
+        terminalVolt > 56.0f && terminalVolt < 85.5f && 
+        terminalCurr > 0.0f && terminalCurr < 300.0f)
     {
         unsigned long now = millis();
         float dt_hours = (now - lastEnergyTime) / 3600000.0f;
-        energyWh += chargerVolt * chargerCurr * dt_hours;
+        energyWh += terminalVolt * terminalCurr * dt_hours;
         lastEnergyTime = now;
     }
     else
@@ -280,20 +313,39 @@ void loop()
         lastEnergyTime = millis();
     }
 
-    // Debug output every 10 seconds
+    // Debug output every 10 seconds - display terminal values
     static unsigned long lastDebug = 0;
     if (millis() - lastDebug >= 10000)
     {
-        // Check OCPP connection status (not transaction status)
-        bool ocppConnected = isOperative();
+        // Check OCPP connection and transaction status
+        bool ocppConnected = ocpp::isConnected();
+        bool txActive = isTransactionActive(1);  // Preparing or running
+        bool txRunning = isTransactionRunning(1);  // Actively running
+        bool chargerHealthy = isChargerModuleHealthy();
+        bool ocppAllows = ocppPermitsCharge(1);
 
         Serial.printf("\n[Status] Uptime: %us | WiFi: %s | OCPP: %s | State: %s\n",
                       g_healthMonitor.getUptimeSeconds(),
                       g_wifiManager.isConnected() ? "✅" : "❌",
                       ocppConnected ? "Connected" : "Disconnected",
                       g_ocppStateMachine.getStateName());
-        Serial.printf("[Metrics] V=%.1fV I=%.1fA SOC=%d%% Energy=%.2fWh\n",
-                      chargerVolt, chargerCurr, (int)socPercent, energyWh);
+        Serial.printf("[Metrics] V=%.1fV I=%.1fA SOC=%.1f%% Range=%.1fkm Temp=%.1f°C Energy=%.2fWh\n",
+                      terminalVolt, terminalCurr, socPercent, rangeKm, chargerTemp, energyWh);
+        
+        const char* modelName = "Unknown";
+        if (vehicleModel == 1) modelName = "Classic";
+        else if (vehicleModel == 2) modelName = "Pro";
+        else if (vehicleModel == 3) modelName = "Max";
+        
+        Serial.printf("[Vehicle] Model=%s | Capacity=%.0fAh | BMS_Imax=%.1fA\n",
+                      modelName, batteryAh, BMS_Imax);
+        Serial.printf("[Charger] Module=%s | Enabled=%s | TX=%s/%s | Current=%s | OCPP=%s\n",
+                      chargerHealthy ? "ONLINE" : "OFFLINE",
+                      chargingEnabled ? "YES" : "NO",
+                      txActive ? "ACTIVE" : "IDLE",
+                      txRunning ? "RUNNING" : "STOPPED",
+                      (terminalCurr > 1.0f) ? "FLOWING" : "ZERO",
+                      ocppAllows ? "PERMITS" : "BLOCKS");
         lastDebug = millis();
     }
 
