@@ -1,0 +1,6 @@
+@echo off
+echo Cleaning build cache...
+rmdir /s /q .pio\build\charger_esp32_production 2>nul
+echo Building firmware...
+C:\Users\AKSHAY\.platformio\penv\Scripts\platformio.exe run -e charger_esp32_production
+pause

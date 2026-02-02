@@ -21,6 +21,7 @@ static volatile uint16_t legacyRxTail = 0;
 
 // Driver status
 static CanStatus driverStatus = {false, false, 0, 0, 0, 0};
+static SemaphoreHandle_t canRecoveryMutex = nullptr;
 
 // Legacy functions for backward compatibility
 void pushFrame(const twai_message_t &msg)
@@ -63,28 +64,40 @@ namespace CAN
     {
         Serial.println("[CAN] Initializing...");
         
-        twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)21, (gpio_num_t)22, TWAI_MODE_NORMAL);
-        twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
-        twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-
-        esp_err_t err = twai_driver_install(&g_config, &t_config, &f_config);
-        if (err != ESP_OK)
-        {
-            Serial.printf("[CAN] Install failed: %d\n", err);
-            return false;
+        // Create recovery mutex on first init
+        if (canRecoveryMutex == nullptr) {
+            canRecoveryMutex = xSemaphoreCreateMutex();
         }
+        
+        // Take mutex to prevent RX task from accessing driver during init
+        if (canRecoveryMutex && xSemaphoreTake(canRecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)21, (gpio_num_t)22, TWAI_MODE_NORMAL);
+            twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
+            twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-        err = twai_start();
-        if (err != ESP_OK)
-        {
-            Serial.printf("[CAN] Start failed: %d\n", err);
-            return false;
+            esp_err_t err = twai_driver_install(&g_config, &t_config, &f_config);
+            if (err != ESP_OK)
+            {
+                Serial.printf("[CAN] Install failed: %d\n", err);
+                xSemaphoreGive(canRecoveryMutex);
+                return false;
+            }
+
+            err = twai_start();
+            if (err != ESP_OK)
+            {
+                Serial.printf("[CAN] Start failed: %d\n", err);
+                xSemaphoreGive(canRecoveryMutex);
+                return false;
+            }
+
+            driverStatus.is_initialized = true;
+            driverStatus.is_active = true;
+            Serial.println("[CAN] Initialized successfully");
+            xSemaphoreGive(canRecoveryMutex);
+            return true;
         }
-
-        driverStatus.is_initialized = true;
-        driverStatus.is_active = true;
-        Serial.println("[CAN] Initialized successfully");
-        return true;
+        return false;
     }
 
     bool deinit()
@@ -175,29 +188,37 @@ void can_rx_task(void *arg)
     twai_message_t msg;
     while (true)
     {
-        esp_err_t err = twai_receive(&msg, pdMS_TO_TICKS(1000));
-        if (err == ESP_OK)
+        // Take mutex before accessing TWAI driver
+        if (canRecoveryMutex && xSemaphoreTake(canRecoveryMutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
-            // FIX: Check buffer overflow before writing
-            uint16_t nextHead = (rxHead + 1) % RX_BUFFER_SIZE;
-            if (nextHead != rxTail)
+            if (driverStatus.is_initialized && driverStatus.is_active)
             {
-                rxBuffer[rxHead].frame = msg;
-                rxBuffer[rxHead].timestamp_ms = millis();
-                rxHead = nextHead;
-                driverStatus.total_rx_messages++;
-                driverStatus.last_activity_ms = millis();
+                esp_err_t err = twai_receive(&msg, pdMS_TO_TICKS(100));
+                if (err == ESP_OK)
+                {
+                    // FIX: Check buffer overflow before writing
+                    uint16_t nextHead = (rxHead + 1) % RX_BUFFER_SIZE;
+                    if (nextHead != rxTail)
+                    {
+                        rxBuffer[rxHead].frame = msg;
+                        rxBuffer[rxHead].timestamp_ms = millis();
+                        rxHead = nextHead;
+                        driverStatus.total_rx_messages++;
+                        driverStatus.last_activity_ms = millis();
+                    }
+                    else
+                    {
+                        // Buffer full - drop oldest message
+                        rxTail = (rxTail + 1) % RX_BUFFER_SIZE;
+                        driverStatus.error_count++;
+                    }
+                    
+                    // Also push to legacy buffer for compatibility
+                    pushFrame(msg);
+                }
             }
-            else
-            {
-                // Buffer full - drop oldest message
-                rxTail = (rxTail + 1) % RX_BUFFER_SIZE;
-                driverStatus.error_count++;
-            }
-            
-            // Also push to legacy buffer for compatibility
-            pushFrame(msg);
+            xSemaphoreGive(canRecoveryMutex);
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

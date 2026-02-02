@@ -13,21 +13,15 @@
 #include "../include/health_monitor.h"
 #include "../include/ocpp_state_machine.h"
 #include "../include/security_manager.h"
-#include "../include/drivers/can_driver.h"
+#include "../include/modules/ota_manager.h"
+#include "../include/drivers/can_twai_driver.h"
+#include "../include/drivers/can_mcp2515_driver.h"
 #include "../include/config/version.h"
 
 using namespace prod;
 
 // OCPP Task handle
 static TaskHandle_t ocppTaskHandle = nullptr;
-
-// Plug sensor function - customize based on your hardware
-bool getPlugState()
-{
-    // Use the gunPhysicallyConnected signal from CAN bus
-    extern bool gunPhysicallyConnected;
-    return gunPhysicallyConnected;
-}
 
 // OCPP task (runs on Core 0) - Uses ocpp_manager for all OCPP logic
 void ocppTask(void *pvParameters)
@@ -87,32 +81,59 @@ void setup()
     Serial.printf("[System] Reboot count: %u\n", g_persistence.getRebootCount());
     g_persistence.recordRebootCount();
 
-    // Initialize CAN bus
-    if (!CAN::init())
+    // Initialize CAN buses
+    Serial.println("[System] 🚌 Initializing dual CAN buses...");
+    
+    // CAN1 - ISO1050 (TWAI) - Charger Module
+    if (!CAN_TWAI::init())
     {
-        Serial.println("[System] ❌ CAN init failed!");
+        Serial.println("[System] ❌ CAN1 (Charger) init failed!");
+    }
+    
+    // CAN2 - MCP2515 (SPI) - Vehicle BMS
+    if (!CAN_MCP2515::init())
+    {
+        Serial.println("[System] ❌ CAN2 (BMS) init failed!");
     }
 
-    // FIX #4: Increase CAN task priority and stack size (safety-critical)
-    // Create CAN RX task - HIGH PRIORITY (priority 8)
-    TaskHandle_t canRxHandle = nullptr;
-    BaseType_t canRxResult = xTaskCreatePinnedToCore(
-        can_rx_task,
-        "CAN_RX",
-        6144, // Increased from 4096 to prevent stack overflow
+    // Create CAN1 RX task (Charger) - HIGH PRIORITY (priority 8)
+    TaskHandle_t can1RxHandle = nullptr;
+    BaseType_t can1RxResult = xTaskCreatePinnedToCore(
+        can1_rx_task,
+        "CAN1_RX",
+        6144,
         nullptr,
-        8, // Increased from 5 - higher priority for safety
-        &canRxHandle,
+        8,
+        &can1RxHandle,
         1);
     
-    if (canRxResult != pdPASS)
+    if (can1RxResult != pdPASS)
     {
-        Serial.println("[CRITICAL] Failed to create CAN_RX task!");
+        Serial.println("[CRITICAL] Failed to create CAN1_RX task!");
     }
     else
     {
-        // SAFETY: Add to watchdog
-        g_healthMonitor.addTaskToWatchdog(canRxHandle, "CAN_RX");
+        g_healthMonitor.addTaskToWatchdog(can1RxHandle, "CAN1_RX");
+    }
+
+    // Create CAN2 RX task (BMS) - HIGH PRIORITY (priority 8)
+    TaskHandle_t can2RxHandle = nullptr;
+    BaseType_t can2RxResult = xTaskCreatePinnedToCore(
+        can2_rx_task,
+        "CAN2_RX",
+        6144,
+        nullptr,
+        8,
+        &can2RxHandle,
+        1);
+    
+    if (can2RxResult != pdPASS)
+    {
+        Serial.println("[CRITICAL] Failed to create CAN2_RX task!");
+    }
+    else
+    {
+        g_healthMonitor.addTaskToWatchdog(can2RxHandle, "CAN2_RX");
     }
 
     // Create charger communication task - HIGH PRIORITY (priority 7)
@@ -187,6 +208,10 @@ void setup()
     Serial.println("[System] 🔒 Initializing security...");
     g_securityManager.init();
 
+    // Initialize OTA manager
+    Serial.println("[System] 🔄 Initializing OTA...");
+    g_otaManager.init();
+
     // For production with valid SSL certificate, uncomment:
     // const char* ROOT_CA = "-----BEGIN CERTIFICATE-----\n..."; 
     // g_securityManager.loadRootCA(ROOT_CA);
@@ -197,10 +222,7 @@ void setup()
 
     // NOTE: OCPP initialization now happens in ocppTask after WiFi is ready
     // This prevents the race condition that was causing crashes
-
-    // FIX #3: Set plug sensor for Finishing -> Available transition
-    setConnectorPluggedInput([]()
-                             { return getPlugState(); });
+    // Connector plug detection is configured in ocpp_manager.cpp
 
     // Initialize OCPP state machine
     g_ocppStateMachine.init();
@@ -210,6 +232,12 @@ void setup()
 
 void loop()
 {
+    // CRITICAL: Wait for OCPP initialization before accessing connector 1
+    if (!ocppInitialized) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        return;
+    }
+    
     // CRITICAL: Feed watchdog for loop task
     g_healthMonitor.feed();
     
@@ -223,35 +251,182 @@ void loop()
     // Poll OCPP state machine (deadlock prevention, timeout handling)
     g_ocppStateMachine.poll();
 
-    // Monitor plug state and send status updates
+    // HYBRID PLUG DISCONNECT DETECTION (Option 4)
+    static unsigned long lastPlugCheck = 0;
+    static unsigned long zeroCurrentStart = 0;
+    static float lastVoltageCheck = 0.0f;
+    static unsigned long lastVoltageTime = 0;
+    
+    if (millis() - lastPlugCheck >= 500)
+    {
+        bool shouldDisconnect = false;
+        
+        // Method 1: BMS timeout (3 seconds) - Most reliable
+        if ((gunPhysicallyConnected || batteryConnected) && (millis() - lastBMS > 3000))
+        {
+            Serial.println("[PLUG] 🔌 Disconnected: BMS timeout (3s)");
+            shouldDisconnect = true;
+        }
+        
+        // Method 2: Zero current timeout - ONLY during active charging
+        if (transactionActive && chargingEnabled && 
+            terminalVolt > 56.0f && terminalCurr < 0.5f)
+        {
+            if (zeroCurrentStart == 0)
+            {
+                zeroCurrentStart = millis();
+            }
+            else if (millis() - zeroCurrentStart > 5000)
+            {
+                Serial.println("[PLUG] 🔌 Disconnected: Zero current during charging (5s)");
+                shouldDisconnect = true;
+            }
+        }
+        else
+        {
+            zeroCurrentStart = 0;
+        }
+        
+        // Method 3: Voltage drop rate (>2V/s)
+        if (terminalVolt > 10.0f)
+        {
+            if (lastVoltageTime > 0)
+            {
+                float deltaV = lastVoltageCheck - terminalVolt;
+                float deltaT = (millis() - lastVoltageTime) / 1000.0f;
+                if (deltaT > 0.5f && (deltaV / deltaT) > 2.0f)
+                {
+                    Serial.printf("[PLUG] 🔌 Disconnected: Fast voltage drop (%.1fV/s)\n", deltaV / deltaT);
+                    shouldDisconnect = true;
+                }
+            }
+            lastVoltageCheck = terminalVolt;
+            lastVoltageTime = millis();
+        }
+        else
+        {
+            // Reset tracking when voltage too low
+            lastVoltageCheck = 0.0f;
+            lastVoltageTime = 0;
+        }
+        
+        // Execute disconnect
+        if (shouldDisconnect && (gunPhysicallyConnected || batteryConnected))
+        {
+            gunPhysicallyConnected = false;
+            batteryConnected = false;
+            zeroCurrentStart = 0;
+            Serial.println("[PLUG] ✅ Status: DISCONNECTED");
+            
+            // Only stop transaction if one is actually running
+            if (transactionActive && isTransactionRunning(1)) {
+                Serial.printf("[PLUG] 🛑 Stopping transaction due to EV disconnect (txId=%d)\n", activeTransactionId);
+                endTransaction(nullptr, "EVDisconnected");
+            } else {
+                Serial.println("[PLUG] ℹ️  No active transaction - just updating status to Available");
+            }
+        }
+        
+        lastPlugCheck = millis();
+    }
+
+    // Monitor plug connection state changes
     static bool lastPlugState = false;
-    bool currentPlugState = getPlugState();
+    bool currentPlugState = (gunPhysicallyConnected && batteryConnected);
+    
     if (currentPlugState != lastPlugState)
     {
-        lastPlugState = currentPlugState;
-        if (!currentPlugState)
+        if (currentPlugState)
         {
-            // Gun unplugged - send Available status
-            Serial.println("[OCPP] 🔌 Gun unplugged, sending Available status");
-            // MicroOcpp will automatically send StatusNotification when plug state changes
+            Serial.println("[PLUG] 🔌 Gun plugged, vehicle detected");
         }
+        lastPlugState = currentPlugState;
+    }
+    
+    // Send VehicleInfo for pay-and-charge: User needs vehicle data BEFORE RemoteStart
+    // to calculate charging cost and choose charging options
+    static unsigned long lastVehicleInfoSent = 0;
+    static bool firstSendDone = false;
+    
+    // Send when EV connected in Preparing state (waiting for user to start charging)
+    // Stop when transaction starts (RemoteStart accepted)
+    bool shouldSendVehicleInfo = (
+        batteryConnected && 
+        gunPhysicallyConnected && 
+        !transactionActive &&  // No transaction started yet
+        !isTransactionRunning(1) &&  // Double-check no active transaction
+        BMS_Imax > 0.0f && 
+        terminalVolt > 56.0f &&
+        socPercent > 0.0f  // Valid SOC data
+    );
+    
+    if (shouldSendVehicleInfo)
+    {
+        // Fast updates: 3s first time, then 5s interval for real-time data
+        unsigned long interval = firstSendDone ? 5000 : 3000;
+        
+        if (millis() - lastVehicleInfoSent >= interval)
+        {
+            ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);
+            lastVehicleInfoSent = millis();
+            firstSendDone = true;
+        }
+    }
+    else
+    {
+        // Reset when conditions not met
+        if (transactionActive || isTransactionRunning(1) || !batteryConnected) {
+            lastVehicleInfoSent = 0;
+            firstSendDone = false;
+        }
+    }
+
+    // SAFETY: Monitor BMS charging permission (100ms check)
+    static bool lastBmsSafeToCharge = false;
+    static unsigned long lastBmsSafetyCheck = 0;
+    
+    if (millis() - lastBmsSafetyCheck >= 100)
+    {
+        if (bmsSafeToCharge != lastBmsSafeToCharge)
+        {
+            if (!bmsSafeToCharge)
+            {
+                Serial.println("[SAFETY] 🚨 BMS CHARGING DISABLED!");
+                
+                if (transactionActive && isTransactionRunning(1))
+                {
+                    Serial.printf("[SAFETY] 🚨 EMERGENCY STOP - BMS switched OFF during charging (txId=%d)\n", activeTransactionId);
+                    ocpp::sendBMSAlert("BMS_EMERGENCY_STOP", "BMS disabled charging during transaction");
+                    endTransaction(nullptr, "EmergencyStop");
+                }
+                else
+                {
+                    ocpp::sendBMSAlert("BMS_CHARGING_DISABLED", "BMS not ready for charging");
+                }
+            }
+            else
+            {
+                Serial.println("[SAFETY] ✅ BMS charging enabled");
+                ocpp::sendBMSAlert("BMS_CHARGING_ENABLED", "BMS ready for charging");
+            }
+            lastBmsSafeToCharge = bmsSafeToCharge;
+        }
+        
+        lastBmsSafetyCheck = millis();
     }
 
     // Accumulate energy when charging - use terminal values with validation
     static unsigned long lastEnergyTime = millis();
     static unsigned long lastChargerHealthCheck = 0;
     
-    // Check if OCPP permits charging (Smart Charging limits, availability)
-    bool ocppAllowsCharge = ocppPermitsCharge(1);
-    
-    // PRODUCTION FIX: Check charger module health every 2 seconds
     if (millis() - lastChargerHealthCheck >= 2000)
     {
         bool chargerHealthy = isChargerModuleHealthy();
-        static bool lastChargerHealthy = true; // Track previous state
+        static bool lastChargerHealthy = false;
+        static bool firstCheck = true;
         
-        // Detect health state change
-        if (chargerHealthy != lastChargerHealthy)
+        // Detect health state change (skip logging on first check)
+        if (!firstCheck && chargerHealthy != lastChargerHealthy)
         {
             if (!chargerHealthy)
             {
@@ -265,47 +440,64 @@ void loop()
                              millis() - lastTerminalStatus,
                              millis() - lastHeartbeat);
                 
-                // Send OCPP StatusNotification: Faulted
-                Serial.println("[OCPP] 🚨 Sending StatusNotification: Faulted");
-                // MicroOcpp will send this via state machine
+                // CRITICAL: Force connector to Unavailable
+                Serial.println("[OCPP] 🚨 Forcing connector to Unavailable");
+                // MicroOcpp will automatically update based on setEvseReadyInput
             }
             else
             {
                 Serial.println("\n[CHARGER] ✅ Charger module communication restored!");
-                Serial.println("[OCPP] ✅ Sending StatusNotification: Available");
+                Serial.println("[OCPP] ✅ Connector now Available");
             }
             
             lastChargerHealthy = chargerHealthy;
         }
         
+        if (firstCheck)
+        {
+            lastChargerHealthy = chargerHealthy;
+            firstCheck = false;
+        }
+        
         // If charging enabled but charger offline, stop transaction
         if (chargingEnabled && !chargerHealthy)
         {
-            if (isTransactionRunning(1))
+            if (transactionActive && isTransactionRunning(1))
             {
-                Serial.println("[CHARGER] 🛑 Auto-stopping transaction due to charger module offline");
-                endTransaction();
+                Serial.printf("[CHARGER] 🚨 SAFETY: Charger offline during transaction (txId=%d)\n", activeTransactionId);
+                Serial.println("[CHARGER] 🔍 Check: CAN bus, charger power, hardware connection");
+                endTransaction(nullptr, "EVSEFailure");
             }
-        }
-        
-        // If OCPP doesn't permit charging, disable it
-        if (chargingEnabled && !ocppAllowsCharge)
-        {
-            Serial.println("[OCPP] ⚠️  OCPP does not permit charging (Smart Charging limit or unavailable)");
-            chargingEnabled = false;
         }
         
         lastChargerHealthCheck = millis();
     }
     
-    // Only accumulate energy if OCPP permits and conditions are valid
-    if (chargingEnabled && ocppAllowsCharge && 
+    // FINAL FIX: HARD GATE without txId check
+    // Golden Rule: OCPP authorization comes from StartTransaction acceptance, NOT txId
+    bool ocppAllows = ocppPermitsCharge(1);
+    bool canCharge = (
+        ocppAllows &&           // OCPP must permit FIRST
+        transactionActive &&    // Transaction started
+        chargingEnabled         // Hardware enabled by OCPP callback
+    );
+    
+    // Only accumulate energy if HARD GATE is open AND hardware conditions valid
+    if (canCharge && 
         terminalVolt > 56.0f && terminalVolt < 85.5f && 
         terminalCurr > 0.0f && terminalCurr < 300.0f)
     {
         unsigned long now = millis();
         float dt_hours = (now - lastEnergyTime) / 3600000.0f;
-        energyWh += terminalVolt * terminalCurr * dt_hours;
+        float energyDelta = terminalVolt * terminalCurr * dt_hours;
+        
+        // Only add positive energy increments with mutex protection
+        if (energyDelta > 0.0f && energyDelta < 1000.0f) {
+            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                energyWh += energyDelta;
+                xSemaphoreGive(dataMutex);
+            }
+        }
         lastEnergyTime = now;
     }
     else
@@ -322,15 +514,15 @@ void loop()
         bool txActive = isTransactionActive(1);  // Preparing or running
         bool txRunning = isTransactionRunning(1);  // Actively running
         bool chargerHealthy = isChargerModuleHealthy();
-        bool ocppAllows = ocppPermitsCharge(1);
+        bool ocppPermits = ocppPermitsCharge(1);
 
         Serial.printf("\n[Status] Uptime: %us | WiFi: %s | OCPP: %s | State: %s\n",
                       g_healthMonitor.getUptimeSeconds(),
                       g_wifiManager.isConnected() ? "✅" : "❌",
                       ocppConnected ? "Connected" : "Disconnected",
                       g_ocppStateMachine.getStateName());
-        Serial.printf("[Metrics] V=%.1fV I=%.1fA SOC=%.1f%% Range=%.1fkm Temp=%.1f°C Energy=%.2fWh\n",
-                      terminalVolt, terminalCurr, socPercent, rangeKm, chargerTemp, energyWh);
+        Serial.printf("[Metrics] V=%.1fV I=%.1fA SOC=%.1f%% Range=%.1fkm Temp=%.1f°C Energy=%.2fWh (meter=%d)\n",
+                      terminalVolt, terminalCurr, socPercent, rangeKm, chargerTemp, energyWh, (int)energyWh);
         
         const char* modelName = "Unknown";
         if (vehicleModel == 1) modelName = "Classic";
@@ -345,7 +537,7 @@ void loop()
                       txActive ? "ACTIVE" : "IDLE",
                       txRunning ? "RUNNING" : "STOPPED",
                       (terminalCurr > 1.0f) ? "FLOWING" : "ZERO",
-                      ocppAllows ? "PERMITS" : "BLOCKS");
+                      ocppPermits ? "PERMITS" : "BLOCKS");
         lastDebug = millis();
     }
 

@@ -30,9 +30,19 @@ namespace ocpp
     bool isConnected();
 
     /**
-     * Notify OCPP of charger fault state
+     * Send vehicle info via DataTransfer (before transaction starts)
      */
-    void notifyChargerFault(bool faulted);
+    void sendVehicleInfo(float soc, float maxCurrent, float voltage, float current, float temperature, uint8_t model, float range);
+
+    /**
+     * Send session summary via DataTransfer (after transaction ends)
+     */
+    void sendSessionSummary(float finalSoc, float energyDelivered, float duration);
+
+    /**
+     * Send BMS alert to server
+     */
+    void sendBMSAlert(const char* alertType, const char* message);
 
 } // namespace ocpp
 

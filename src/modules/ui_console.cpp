@@ -57,7 +57,7 @@ void printMenu()
     Serial.println("5 → Show All Data");
     Serial.println("---------------------------------------");
     Serial.println("s → Start Charging");
-    Serial.println("t → Stop Charging");
+    Serial.println("t → 🚨 EMERGENCY STOP (immediate)");
     Serial.println("0 → Mute Output");
     Serial.println("=======================================\n");
 }
@@ -217,18 +217,34 @@ void processSerialInput()
         break;
     case 't':
     case 'T':
-        if (isTransactionRunning(1) && ocppInitialized)
+        Serial.println("\n🚨 EMERGENCY STOP TRIGGERED!");
+        
+        // IMMEDIATE hardware disable
+        chargingEnabled = false;
+        
+        if (ocppInitialized && isTransactionRunning(1))
         {
-            endTransaction();
-            Serial.println("OCPP StopTransaction requested");
-            // Removed: chargingEnabled = false; // Now handled by OCPP
+            Serial.println("⏹️  Stopping transaction via OCPP...");
+            endTransaction(nullptr, "Local");
             sessionActive = false;
+        }
+        else if (ocppInitialized && transactionActive)
+        {
+            Serial.println("⏹️  Clearing transaction state...");
+            transactionActive = false;
+            activeTransactionId = -1;
+            remoteStartAccepted = false;
         }
         else if (!ocppInitialized)
         {
-            Serial.println("❌ Cannot stop transaction: OCPP not initialized");
+            Serial.println("⚠️  OCPP not initialized - hardware disabled only");
         }
-        // printChargingState(false); // Remove this, status will be set by OCPP
+        else
+        {
+            Serial.println("ℹ️  No active transaction - hardware already safe");
+        }
+        
+        Serial.println("✅ EMERGENCY STOP COMPLETE - Charger disabled\n");
         break;
     default:
         break;
