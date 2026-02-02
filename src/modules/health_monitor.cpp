@@ -11,10 +11,6 @@ namespace prod
         if (watchdogInitialized)
             return;
 
-        // DISABLED: Watchdog causing boot loops
-        // esp_task_wdt_init(WATCHDOG_TIMEOUT_SECONDS, true);
-        // esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-        
         watchdogInitialized = true;
         lastWiFiConnectTime = millis();
         lastHealthCheck = millis();
@@ -23,7 +19,6 @@ namespace prod
     
     void HealthMonitor::addTaskToWatchdog(TaskHandle_t task, const char* taskName)
     {
-        // Watchdog disabled
         Serial.printf("[Health] ⚠️  Watchdog disabled - %s not registered\n", taskName);
     }
 
@@ -41,38 +36,10 @@ namespace prod
         }
         lastHealthCheck = now;
 
-        // Check WiFi timeout
         if (g_wifiManager.isConnected())
         {
             lastWiFiConnectTime = now;
         }
-        else if (transactionInProgress)
-        {
-            uint32_t disconnectDuration = now - lastWiFiConnectTime;
-            if (disconnectDuration > WIFI_DISCONNECT_TIMEOUT_MS)
-            {
-                Serial.printf("[Health] ⚠️  WiFi disconnected for %u seconds, aborting transaction\n",
-                              disconnectDuration / 1000);
-                // Signal transaction abort (implementation depends on OCPP setup)
-                onTransactionEnded();
-            }
-        }
-
-        // Check for hardware faults
-        if (checkHardwareFault())
-        {
-            Serial.println("[Health] ⚠️  Hardware fault detected!");
-        }
-
-        // Check actual charging state from global variable
-        extern bool chargingEnabled; // Global namespace
-        bool actualTxActive = ::chargingEnabled;
-
-        // Periodic status
-        Serial.printf("[Health] Uptime: %u sec, WiFi: %s, TX Active: %s\n",
-                      getUptimeSeconds(),
-                      g_wifiManager.isConnected() ? "✅" : "❌",
-                      actualTxActive ? "Yes" : "No");
     }
 
     void HealthMonitor::onTransactionStarted()
@@ -114,16 +81,7 @@ namespace prod
 
     bool HealthMonitor::checkHardwareFault()
     {
-        // Check temperature (if available)
-        // Check overcurrent (if available)
-        // Check undervoltage (if available)
-        // Return true if any fault detected
-
-        // Example: Check charger temperature from existing globals
-        // extern float chargerTemp;
-        // if (chargerTemp > 80.0f) return true; // Overheat
-
-        return false; // No fault for now
+        return false;
     }
 
     HealthMonitor g_healthMonitor;

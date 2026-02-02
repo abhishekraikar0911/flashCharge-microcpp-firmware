@@ -38,11 +38,13 @@ float metric83_scaled = 0.0f;
 
 unsigned long lastBMS = 0;
 uint8_t heating = 0;
+// CRITICAL: Initialize to 0 for proper timeout detection at boot
+// With millis() - 0, timeout will trigger immediately if no messages received
 unsigned long lastHeartbeat = 0;
 unsigned long lastChargerResponse = 0;
-unsigned long lastTerminalPower = 0;  // NEW: Track terminal power CAN messages
-unsigned long lastTerminalStatus = 0; // NEW: Track terminal status CAN messages
-bool chargerModuleOnline = false;     // NEW: Charger module health status
+unsigned long lastTerminalPower = 0;
+unsigned long lastTerminalStatus = 0;
+bool chargerModuleOnline = false;     // Charger offline at boot
 
 const char *chargerStatus = "UNKNOWN";
 const char *terminalchargerStatus = "UNKNOWN";
@@ -54,6 +56,13 @@ uint8_t stopCmd = 0;
 
 bool sessionActive = false;
 bool ocppInitialized = false;
+
+// =========================================================
+// TRANSACTION GATE (FIX 1 - HARD GATE)
+// =========================================================
+bool transactionActive = false;      // TRUE only when valid transaction running
+int activeTransactionId = -1;        // Valid transaction ID (>0)
+bool remoteStartAccepted = false;    // TRUE only after RemoteStart accepted
 
 // Buffers
 uint8_t lastData[8] = {0};
@@ -78,22 +87,42 @@ volatile bool updateCAN = false;
 // Initialize mutexes in setup
 void initGlobals()
 {
-    // FIX: Check if mutexes already created to prevent memory leak
+    // FIX: Retry mutex creation with reboot on failure (production-ready)
     if (dataMutex == nullptr)
     {
-        dataMutex = xSemaphoreCreateMutex();
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            dataMutex = xSemaphoreCreateMutex();
+            if (dataMutex != nullptr) break;
+            
+            Serial.printf("[CRITICAL] Failed to create dataMutex (attempt %d/3)\n", attempt);
+            delay(100);
+        }
+        
         if (dataMutex == nullptr)
         {
-            Serial.println("[CRITICAL] Failed to create dataMutex!");
+            Serial.println("[CRITICAL] dataMutex creation failed after 3 attempts - REBOOTING...");
+            delay(1000);
+            ESP.restart();
         }
     }
     
     if (serialMutex == nullptr)
     {
-        serialMutex = xSemaphoreCreateMutex();
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            serialMutex = xSemaphoreCreateMutex();
+            if (serialMutex != nullptr) break;
+            
+            Serial.printf("[CRITICAL] Failed to create serialMutex (attempt %d/3)\n", attempt);
+            delay(100);
+        }
+        
         if (serialMutex == nullptr)
         {
-            Serial.println("[CRITICAL] Failed to create serialMutex!");
+            Serial.println("[CRITICAL] serialMutex creation failed after 3 attempts - REBOOTING...");
+            delay(1000);
+            ESP.restart();
         }
     }
 }

@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/Users/AKSHAY/Documents/PlatformIO/Projects/microocpp/lib/MicroOcpp"
+    "cmake.sourceDirectory": "C:/Users/AKSHAY/Documents/PlatformIO/Projects/microocpp/lib/MicroOcpp",
+    "editor.defaultFormatter": "amazonwebservices.amazon-q-vscode"
 }

@@ -18,6 +18,10 @@
 #define ID_BMS_REQUEST 0x1806E5F4UL
 #define ID_SOC_REQUEST 0x160B0180UL
 #define ID_SOC_RESPONSE 0x160B8001UL
+#define ID_CHARGE_AH_REQUEST 0x160B0180UL
+#define ID_CHARGE_AH_RESPONSE 0x160B8001UL
+#define ID_DISCHARGE_AH_REQUEST 0x160D0180UL
+#define ID_DISCHARGE_AH_RESPONSE 0x160D8001UL
 
 // =========================================================
 // GLOBAL SYNCHRONIZATION
@@ -36,6 +40,10 @@ extern bool batteryConnected;
 extern bool chargingEnabled;
 extern bool chargingswitch;
 
+// BMS Safety flags
+extern bool bmsSafeToCharge;  // TRUE only when byte4=0x00
+extern bool bmsHeatingActive;  // TRUE when byte5=0x01
+
 extern float BMS_Vmax, BMS_Imax;
 extern float Charger_Vmax, Charger_Imax;
 extern float chargerVolt, chargerCurr, chargerTemp, terminalchargerPower;
@@ -45,6 +53,8 @@ extern float rangeKm;
 extern uint8_t vehicleModel;  // 0=Unknown, 1=Classic, 2=Pro, 3=Max
 extern float batteryAh;
 extern float batterySoc;
+extern float totalChargingAh;    // NEW: Total charging Ah (lifetime)
+extern float totalDischargingAh; // NEW: Total discharging Ah (lifetime)
 
 extern uint16_t metric79_raw;
 extern float metric79_scaled;
@@ -71,6 +81,13 @@ extern bool sessionActive;
 
 // OCPP initialization status
 extern bool ocppInitialized;
+
+// =========================================================
+// TRANSACTION GATE (FIX 1 - HARD GATE)
+// =========================================================
+extern bool transactionActive;      // TRUE only when valid transaction running
+extern int activeTransactionId;     // Valid transaction ID (>0)
+extern bool remoteStartAccepted;    // TRUE only after RemoteStart accepted
 
 // Transaction state (for safe MeterValues) - UNUSED
 // extern bool transactionActive;
@@ -122,13 +139,17 @@ extern bool chargerModuleOnline;  // NEW: Charger module communication status
 bool isChargerModuleHealthy();     // NEW: Check if charger is responding
 void notifyChargerFault(bool faulted); // NEW: Notify OCPP about charger fault
 void initGlobals();
-void twai_init();
-void can_rx_task(void *arg);
+void can1_rx_task(void *arg);  // CAN1 - ISO1050 - Charger
+void can2_rx_task(void *arg);  // CAN2 - MCP2515 - BMS
 void chargerCommTask(void *arg);
 void handleBMSMessage(const twai_message_t &msg);
 void handleChargerMessage(const twai_message_t &msg);
 void requestSOCFromBMS();
 void handleSOCMessage(const twai_message_t &msg);
+void requestChargingAh();        // NEW: Request total charging Ah
+void requestDischargingAh();     // NEW: Request total discharging Ah
+void handleChargingAhMessage(const twai_message_t &msg);    // NEW
+void handleDischargingAhMessage(const twai_message_t &msg); // NEW
 
 bool popFrame(RxBufItem &out);
 void pushFrame(const twai_message_t &msg);

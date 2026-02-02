@@ -6,6 +6,9 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
+// External declarations
+extern bool bmsSafeToCharge;
+
 namespace prod
 {
 
@@ -45,33 +48,8 @@ namespace prod
     {
         uint32_t now = millis();
 
-        // CRITICAL: Check charger module health and update OCPP status
-        static unsigned long lastHealthCheck = 0;
-        if (now - lastHealthCheck >= 2000) // Check every 2 seconds
-        {
-            bool chargerHealthy = isChargerModuleHealthy();
-            
-            // If charger goes offline, send Faulted status
-            if (!chargerHealthy && currentState != ConnectorState::Faulted)
-            {
-                Serial.println("[OCPP_SM] ❌ Charger module offline - sending Faulted status");
-                forceState(ConnectorState::Faulted);
-                
-                // CRITICAL: Tell MicroOcpp to send Faulted status
-                ocpp::notifyChargerFault(true);
-            }
-            // If charger comes back online and we're in Faulted state, recover
-            else if (chargerHealthy && currentState == ConnectorState::Faulted)
-            {
-                Serial.println("[OCPP_SM] ✅ Charger module recovered - sending Available status");
-                forceState(ConnectorState::Available);
-                
-                // CRITICAL: Tell MicroOcpp fault is cleared
-                ocpp::notifyChargerFault(false);
-            }
-            
-            lastHealthCheck = now;
-        }
+        // Note: Charger health status is now handled by setEvseReadyInput in ocpp_manager.cpp
+        // MicroOcpp library automatically manages connector status based on EVSE ready state
 
         // Check for plug status changes (debounced)
         if (now - lastPlugCheckTime > PLUG_DEBOUNCE_MS)
@@ -85,7 +63,16 @@ namespace prod
                               currentPlugState ? "CONNECTED" : "DISCONNECTED");
                 lastPlugState = currentPlugState;
 
-                // Automatic transition from Finishing to Available when plug is removed
+                // FIX 2: LOCK STATE MACHINE - Strict state transitions
+                // Available → (EV Plugged) → Preparing
+                if (currentPlugState && currentState == ConnectorState::Available)
+                {
+                    Serial.println("[OCPP_SM] 🔄 Plug connected, transitioning Preparing");
+                    forceState(ConnectorState::Preparing);
+                }
+                
+                // Finishing → (EV unplugged) → Available
+                // FIX 2: NEVER send Available while in Preparing or Charging
                 if (!currentPlugState && currentState == ConnectorState::Finishing)
                 {
                     Serial.println("[OCPP_SM] 🔄 Plug removed, transitioning Available");
@@ -93,20 +80,33 @@ namespace prod
                     g_persistence.clearTransaction();
                     g_healthMonitor.onTransactionEnded();
                 }
+                else if (!currentPlugState && (currentState == ConnectorState::Preparing || currentState == ConnectorState::Charging))
+                {
+                    // FIX 2: ABSOLUTE RULE - Once in Preparing/Charging, NEVER go back to Available
+                    Serial.printf("[OCPP_SM] ⚠️  Plug removed but in %s state - keeping state (waiting for transaction end)\n", getStateName());
+                }
             }
         }
 
         // Check for state-specific timeouts
         uint32_t stateAge = now - stateEnterTime;
 
-        // Finishing state timeout (60 seconds max)
+        // FIX 2: Finishing state timeout - ONLY on event (EV unplugged), not timer
         if (currentState == ConnectorState::Finishing && stateAge > FINISHING_TIMEOUT_MS)
         {
-            Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - forcing Available\n",
-                          FINISHING_TIMEOUT_MS / 1000.0f);
-            forceState(ConnectorState::Available);
-            g_persistence.clearTransaction();
-            g_healthMonitor.onTransactionEnded();
+            // CRITICAL: Only reset to Available if EV is actually disconnected
+            if (!isPlugConnected())
+            {
+                Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - EV disconnected, transitioning Available\n",
+                              FINISHING_TIMEOUT_MS / 1000.0f);
+                forceState(ConnectorState::Available);
+                g_persistence.clearTransaction();
+                g_healthMonitor.onTransactionEnded();
+            }
+            else
+            {
+                Serial.printf("[OCPP_SM] ⚠️  Finishing timeout but EV still connected - keeping Finishing state\n");
+            }
         }
     }
 
@@ -137,8 +137,17 @@ namespace prod
         // CRITICAL: Check charger module health FIRST
         if (!isChargerModuleHealthy())
         {
-            Serial.println("[OCPP_SM] ❌ Charger module OFFLINE - cannot start transaction");
-            Serial.println("[OCPP_SM] ⚠️  Please check: Charger PCB power, CAN bus connection");
+            Serial.println("[OCPP_SM] ❌ Charger module OFFLINE - REJECTING RemoteStart");
+            Serial.println("[OCPP_SM] ⚠️  Connector is Unavailable - cannot start transaction");
+            return false;  // Reject RemoteStart
+        }
+
+        // SAFETY: Check BMS charging permission
+        if (!bmsSafeToCharge)
+        {
+            Serial.println("[OCPP_SM] ❌ BMS charging disabled - REJECTING RemoteStart");
+            Serial.println("[OCPP_SM] ⚠️  BMS MOSFET is OFF (byte4=0x01)");
+            ocpp::sendBMSAlert("BMS_CHARGING_DISABLED", "Cannot start: BMS MOSFET is OFF");
             return false;
         }
 

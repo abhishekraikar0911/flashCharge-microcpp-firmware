@@ -5,7 +5,7 @@
 #define SECRET_WIFI_PASS "8988984646"
 
 // Charger Identity
-#define SECRET_CHARGER_ID "RIVOT_100A_01"
+#define SECRET_CHARGER_ID "250822008C06"
 #define SECRET_CHARGER_MODEL "Rivot Charger"
 #define SECRET_CHARGER_VENDOR "Rivot Motors"
 

@@ -1,5 +1,6 @@
 #include "header.h"
-#include "drivers/can_driver.h"
+#include "drivers/can_twai_driver.h"
+#include "drivers/can_mcp2515_driver.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -182,13 +183,15 @@ static void decode_00433F01(const twai_message_t &msg)
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         memcpy(lastTermData1, msg.data, dlc > 8 ? 8 : dlc);
+        
         terminalVolt = beFloat(&msg.data[0]);
-        terminalCurr = beFloat(&msg.data[4]);
+        terminalCurr = beFloat(&msg.data[4]);  // Already scaled correctly
         terminalchargerPower = terminalVolt * terminalCurr;
 
         // CRITICAL: Update timestamp for charger health monitoring
         lastTerminalPower = millis();
 
+        // HYBRID PLUG DETECTION - Method 1: Voltage + Current presence
         if (terminalVolt > 56.0f && terminalVolt < 85.5f)
         {
             batteryConnected = true;
@@ -328,7 +331,7 @@ void sendGroupRequest(Group &g)
         tx.data[7] = raw & 0xFF;
     }
 
-    (void)twai_transmit(&tx, pdMS_TO_TICKS(20));
+    (void)CAN_TWAI::sendMessage(tx.identifier, tx.data, tx.data_length_code, true);
     g.funcIndex = (g.funcIndex + 1) % g.funcCount;
 }
 
@@ -352,10 +355,22 @@ void chargerCommTask(void *arg)
                 if (millis() - lastBusRecovery > 5000) // Prevent rapid recovery loops
                 {
                     Serial.println("[CAN] 🚨 BUS-OFF detected, initiating recovery...");
-                    twai_stop();
-                    twai_driver_uninstall();
+                    
+                    // CRITICAL: Stop driver completely before reinstalling
+                    esp_err_t err = twai_stop();
+                    if (err != ESP_OK) {
+                        Serial.printf("[CAN1] Stop failed: %d\n", err);
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    
+                    err = twai_driver_uninstall();
+                    if (err != ESP_OK) {
+                        Serial.printf("[CAN1] Uninstall failed: %d\n", err);
+                    }
                     vTaskDelay(pdMS_TO_TICKS(100));
-                    CAN::init();
+                    
+                    // Reinitialize
+                    CAN_TWAI::init();
                     lastBusRecovery = millis();
                     
                     // SAFETY: Disable charging during CAN recovery
@@ -373,7 +388,7 @@ void chargerCommTask(void *arg)
             {
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
                 {
-                    Serial.printf("📊 CAN: State=%d TX_Err=%d RX_Err=%d TX_Q=%d RX_Q=%d\n",
+                    Serial.printf("📊 CAN1: State=%d TX_Err=%d RX_Err=%d TX_Q=%d RX_Q=%d\n",
                         s.state, s.tx_error_counter, s.rx_error_counter, s.msgs_to_tx, s.msgs_to_rx);
                     xSemaphoreGive(serialMutex);
                 }
@@ -398,16 +413,33 @@ void chargerCommTask(void *arg)
             lastFeedback = millis();
         }
 
-        // Request SOC periodically
+        // Request Ah data periodically
         if (millis() - lastSOCRequest >= 2000)
         {
-            requestSOCFromBMS();
+            requestChargingAh();
+            vTaskDelay(pdMS_TO_TICKS(10));
+            requestDischargingAh();
             lastSOCRequest = millis();
         }
 
-        // Drain RX queue and dispatch
+        // Drain RX queues and dispatch
         RxBufItem item;
-        while (popFrame(item))
+        
+        // Poll CAN1 (Charger messages)
+        while (CAN_TWAI::popFrame(item))
+        {
+            twai_message_t msg = {};
+            msg.identifier = item.id;
+            msg.extd = item.ext ? 1 : 0;
+            msg.rtr = item.rtr ? 1 : 0;
+            msg.data_length_code = item.dlc;
+            memcpy(msg.data, item.data, 8);
+
+            handleChargerMessage(msg);
+        }
+        
+        // Poll CAN2 (BMS messages)
+        while (CAN_MCP2515::popFrame(item))
         {
             twai_message_t msg = {};
             msg.identifier = item.id;
@@ -420,13 +452,17 @@ void chargerCommTask(void *arg)
             {
                 handleBMSMessage(msg);
             }
+            else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_CHARGE_AH_RESPONSE & 0x1FFFFFFFUL))
+            {
+                handleChargingAhMessage(msg);
+            }
+            else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_DISCHARGE_AH_RESPONSE & 0x1FFFFFFFUL))
+            {
+                handleDischargingAhMessage(msg);
+            }
             else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_SOC_RESPONSE & 0x1FFFFFFFUL))
             {
                 handleSOCMessage(msg);
-            }
-            else
-            {
-                handleChargerMessage(msg);
             }
         }
 
