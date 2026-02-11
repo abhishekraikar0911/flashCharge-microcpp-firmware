@@ -1,6 +1,7 @@
 #include "../../include/drivers/can_twai_driver.h"
 #include "../../include/header.h"
 #include "../../include/config/hardware.h"
+#include "../../include/health_monitor.h"
 
 // Ring buffer for received messages (unified format)
 #define TWAI_RX_BUFFER_SIZE 64
@@ -58,11 +59,21 @@ namespace CAN_TWAI
 
     bool deinit()
     {
-        twai_stop();
-        twai_driver_uninstall();
-        driverStatus.is_initialized = false;
-        driverStatus.is_active = false;
-        return true;
+        if (twaiRecoveryMutex == nullptr)
+        {
+            twaiRecoveryMutex = xSemaphoreCreateMutex();
+        }
+
+        if (twaiRecoveryMutex && xSemaphoreTake(twaiRecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
+        {
+            twai_stop();
+            twai_driver_uninstall();
+            driverStatus.is_initialized = false;
+            driverStatus.is_active = false;
+            xSemaphoreGive(twaiRecoveryMutex);
+            return true;
+        }
+        return false;
     }
 
     bool isActive()
@@ -187,6 +198,7 @@ void can1_rx_task(void *arg)
             xSemaphoreGive(twaiRecoveryMutex);
         }
 
+        prod::g_healthMonitor.feed();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

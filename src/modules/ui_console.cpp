@@ -3,6 +3,7 @@
 #include <math.h>
 #include "esp_err.h" // for esp_err_to_name()
 #include <MicroOcpp.h>
+#include "ocpp/ocpp_client.h"
 
 // ====== UI States ======
 static bool uiInitialized = false;
@@ -209,10 +210,19 @@ void processSerialInput()
         {
             Serial.println("\n⛔ Charger switch is OFF. Please turn ON the charger switch in the vehicle.");
         }
+        else if (ocpp::isTransactionActiveSafe(1))
+        {
+            Serial.println("\n⚠️  Transaction already active.");
+        }
         else
         {
-            // Removed: charging control now handled by OCPP RemoteStart
-            Serial.println("🔌 EV connected and ready - Charging will start via OCPP RemoteStart from SteVe");
+            Serial.println("🔌 Requesting transaction start...");
+            if (ocpp::beginTransactionSafe("MANUAL_UI_START", 1)) {
+                Serial.println("✅ Transaction request sent to server");
+                sessionActive = true;
+            } else {
+                Serial.println("❌ Failed to start transaction (check connection)");
+            }
         }
         break;
     case 't':
@@ -222,10 +232,10 @@ void processSerialInput()
         // IMMEDIATE hardware disable
         chargingEnabled = false;
         
-        if (ocppInitialized && isTransactionRunning(1))
+        if (ocppInitialized && ocpp::isTransactionRunningSafe(1))
         {
             Serial.println("⏹️  Stopping transaction via OCPP...");
-            endTransaction(nullptr, "Local");
+            ocpp::endTransactionSafe(nullptr, "Local");
             sessionActive = false;
         }
         else if (ocppInitialized && transactionActive)

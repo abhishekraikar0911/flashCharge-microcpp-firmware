@@ -88,6 +88,7 @@ extern bool ocppInitialized;
 extern bool transactionActive;      // TRUE only when valid transaction running
 extern int activeTransactionId;     // Valid transaction ID (>0)
 extern bool remoteStartAccepted;    // TRUE only after RemoteStart accepted
+extern char persistedIdTag[32];     // NEW: Restored IdTag for library re-hydration
 
 // Transaction state (for safe MeterValues) - UNUSED
 // extern bool transactionActive;
@@ -155,6 +156,7 @@ bool popFrame(RxBufItem &out);
 void pushFrame(const twai_message_t &msg);
 void sendGroupRequest(Group &g);
 void sendChargerFeedback();
+void sendImmediateChargerStop();  // NEW: Immediate hardware stop for RemoteStop safety
 
 void printDecodedData();
 void printMenu();

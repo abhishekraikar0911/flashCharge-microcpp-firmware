@@ -4,8 +4,8 @@
 STEVE_URL="https://your-steve-server.com"
 STEVE_USER="admin"
 STEVE_PASS="admin"
-CHARGER_ID="RIVOT_100A_01"
-FIRMWARE="../.pio/build/charger_esp32_production/firmware.bin"
+CHARGER_ID="250822008C06"
+FIRMWARE="../.pio/build/charger_esp32_production/firmware.signed.bin"
 
 echo "🚀 Uploading firmware to SteVe..."
 

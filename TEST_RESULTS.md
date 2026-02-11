@@ -2,7 +2,7 @@
 ## ESP32 OCPP DC Fast Charger - Production Test
 
 **Test Date:** January 21, 2026  
-**Charger ID:** RIVOT_100A_01  
+**Charger ID:** 250822008C06  
 **Transaction ID:** 129  
 **Test Duration:** ~1 minute (09:36:37 - 09:37:46)
 

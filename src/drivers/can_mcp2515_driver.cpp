@@ -1,6 +1,8 @@
 #include "../../include/drivers/can_mcp2515_driver.h"
 #include "../../include/header.h"
 #include "../../include/config/hardware.h"
+#include "../../include/health_monitor.h"
+#include "../../include/debug_logger.h"
 #include <SPI.h>
 
 // MCP2515 instance
@@ -48,15 +50,21 @@ namespace CAN_MCP2515
                 mcp2515 = new MCP2515(CAN2_CS_PIN);
             }
 
-            // CRITICAL: Don't use reset() - it clears filters
-            // Manual initialization instead
-            MCP2515::ERROR result = mcp2515->setConfigMode();
+            // CRITICAL: Hardware reset first (like test code)
+            Serial.println("[CAN2] Resetting MCP2515...");
+            MCP2515::ERROR result = mcp2515->reset();
             if (result != MCP2515::ERROR_OK)
             {
-                Serial.printf("[CAN2] ❌ Config mode failed: %d\n", result);
+                Serial.printf("[CAN2] ❌ Reset failed: %d\n", result);
+                Serial.println("[CAN2] ⚠️  Possible causes:");
+                Serial.println("[CAN2]    - MCP2515 not connected (check wiring)");
+                Serial.println("[CAN2]    - Wrong pins: CS=5 SCK=18 MISO=19 MOSI=23");
+                Serial.println("[CAN2]    - Module not powered (VCC/GND)");
+                Serial.println("[CAN2] 🔧 Continuing without BMS\n");
                 xSemaphoreGive(mcp2515RecoveryMutex);
                 return false;
             }
+            delay(10); // Give chip time to reset
 
             // Set bitrate (CRITICAL: 8MHz crystal)
             result = mcp2515->setBitrate(CAN_250KBPS, MCP_8MHZ);
@@ -67,40 +75,35 @@ namespace CAN_MCP2515
                 return false;
             }
 
-            // CRITICAL: Configure hardware filters for BMS IDs only
-            // RXF0 (RXB0): 0x1806E5F4 - BMS Request (Vmax, Imax)
+            // Configure hardware filters for BMS messages only
+            // RXB0: Filter 0 = 0x1806E5F4 (BMS Vmax/Imax)
             result = mcp2515->setFilter(MCP2515::RXF0, true, 0x1806E5F4UL);
             if (result != MCP2515::ERROR_OK)
             {
-                Serial.printf("[CAN2] ❌ Filter RXF0 failed: %d\n", result);
+                Serial.printf("[CAN2] ❌ Filter0 failed: %d\n", result);
                 xSemaphoreGive(mcp2515RecoveryMutex);
                 return false;
             }
 
-            // RXF1 (RXB1): 0x160B8001 - Charging Ah Response
+            // RXB0: Filter 1 = 0x160B8001 (ChargingAh response)
             result = mcp2515->setFilter(MCP2515::RXF1, true, 0x160B8001UL);
             if (result != MCP2515::ERROR_OK)
             {
-                Serial.printf("[CAN2] ❌ Filter RXF1 failed: %d\n", result);
+                Serial.printf("[CAN2] ❌ Filter1 failed: %d\n", result);
                 xSemaphoreGive(mcp2515RecoveryMutex);
                 return false;
             }
 
-            // RXF2 (RXB0): 0x160D8001 - Discharging Ah Response
+            // RXB1: Filter 2 = 0x160D8001 (DischargingAh response)
             result = mcp2515->setFilter(MCP2515::RXF2, true, 0x160D8001UL);
             if (result != MCP2515::ERROR_OK)
             {
-                Serial.printf("[CAN2] ❌ Filter RXF2 failed: %d\n", result);
+                Serial.printf("[CAN2] ❌ Filter2 failed: %d\n", result);
                 xSemaphoreGive(mcp2515RecoveryMutex);
                 return false;
             }
 
-            // RXF3-5: Unused, set to impossible ID
-            mcp2515->setFilter(MCP2515::RXF3, true, 0x1FFFFFFFUL);
-            mcp2515->setFilter(MCP2515::RXF4, true, 0x1FFFFFFFUL);
-            mcp2515->setFilter(MCP2515::RXF5, true, 0x1FFFFFFFUL);
-
-            // Set masks to match exact IDs (all bits must match)
+            // Set masks to exact match (only 3 BMS IDs pass)
             result = mcp2515->setFilterMask(MCP2515::MASK0, true, 0x1FFFFFFFUL);
             if (result != MCP2515::ERROR_OK)
             {
@@ -117,7 +120,7 @@ namespace CAN_MCP2515
                 return false;
             }
 
-            Serial.println("[CAN2] ✅ Hardware filters configured (3 BMS IDs only)");
+            Serial.println("[CAN2] ✅ Hardware filters: ONLY 3 BMS IDs (0x1806E5F4, 0x160B8001, 0x160D8001)");
 
             // Set normal mode
             result = mcp2515->setNormalMode();
@@ -240,6 +243,42 @@ namespace CAN_MCP2515
         return (millis() - driverStatus.last_activity_ms) < TIMEOUT_MS;
     }
 
+    bool readDiagnostics()
+    {
+        if (!mcp2515 || !driverStatus.is_active)
+        {
+            Serial.println("[CAN2] ❌ Driver not initialized");
+            return false;
+        }
+
+        Serial.println("\n[CAN2] === MCP2515 Diagnostics ===");
+        
+        // Read error flags
+        uint8_t eflg = mcp2515->getErrorFlags();
+        Serial.printf("EFLG: 0x%02X\n", eflg);
+        
+        // Read TEC/REC (transmit/receive error counters)
+        uint8_t tec = mcp2515->errorCountTX();
+        uint8_t rec = mcp2515->errorCountRX();
+        Serial.printf("TEC: %d, REC: %d\n", tec, rec);
+        
+        // Read interrupt flags
+        uint8_t canintf = mcp2515->getInterrupts();
+        Serial.printf("CANINTF: 0x%02X\n", canintf);
+        
+        // Check if SPI communication is working
+        bool spiOk = (eflg != 0xFF && canintf != 0xFF);
+        Serial.printf("SPI Communication: %s\n", spiOk ? "✅ OK" : "❌ FAILED");
+        
+        // Status
+        uint8_t status = mcp2515->getStatus();
+        Serial.printf("Status: 0x%02X\n", status);
+        
+        Serial.println("================================\n");
+        
+        return spiOk;
+    }
+
 } // namespace CAN_MCP2515
 
 // CAN2 RX Task (BMS messages)
@@ -264,12 +303,16 @@ void can2_rx_task(void *arg)
                     MCP2515::ERROR result = mcp2515->readMessage(&frame);
                     if (result == MCP2515::ERROR_OK)
                     {
+                        // DEBUG: Log received CAN ID
+                        uint32_t rxId = frame.can_id & CAN_EFF_MASK;
+                        LOG_BMS("RX: ID=0x%08X DLC=%d", rxId, frame.can_dlc);
+
                         // Check buffer overflow
                         uint16_t nextHead = (rxHead + 1) % MCP2515_RX_BUFFER_SIZE;
                         if (nextHead != rxTail)
                         {
                             // Convert can_frame to CanMessage
-                            rxBuffer[rxHead].id = frame.can_id & CAN_EFF_MASK;
+                            rxBuffer[rxHead].id = rxId;
                             rxBuffer[rxHead].dlc = frame.can_dlc;
                             memcpy(rxBuffer[rxHead].data, frame.data, 8);
                             rxBuffer[rxHead].extended = (frame.can_id & CAN_EFF_FLAG) != 0;
@@ -289,37 +332,42 @@ void can2_rx_task(void *arg)
                 }
 
                 // Check for bus errors and auto-recover
+                static unsigned long lastErrorLog = 0;
+                static unsigned long lastRecovery = 0;
                 uint8_t errorFlags = mcp2515->getErrorFlags();
                 if (errorFlags != 0)
                 {
-                    // Clear RX overflow flags immediately (0x40 = EFLG_RX1OVR)
+                    // Clear RX overflow flags immediately
                     if (errorFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
                     {
                         mcp2515->clearRXnOVRFlags();
                         driverStatus.error_count++;
                     }
                     
-                    // Only log critical errors (bus-off, not overflow or warnings)
+                    // Only log critical errors once per 10s
                     if (errorFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_RXEP))
                     {
-                        Serial.printf("[CAN2] 🚨 Critical error: 0x%02X\n", errorFlags);
-                        mcp2515->clearRXnOVRFlags();
-                        mcp2515->clearInterrupts();
-                        mcp2515->clearTXInterrupts();
-                        vTaskDelay(pdMS_TO_TICKS(100));
+                        if (millis() - lastErrorLog > 10000)
+                        {
+                            Serial.printf("[CAN2] 🚨 Bus error: 0x%02X (check BMS power/wiring/termination)\n", errorFlags);
+                            lastErrorLog = millis();
+                        }
                         
-                        // Reinitialize
-                        xSemaphoreGive(mcp2515RecoveryMutex);
-                        CAN_MCP2515::deinit();
-                        vTaskDelay(pdMS_TO_TICKS(100));
-                        CAN_MCP2515::init();
-                        continue;
+                        // Attempt recovery only once per 5s
+                        if (millis() - lastRecovery > 5000)
+                        {
+                            mcp2515->clearRXnOVRFlags();
+                            mcp2515->clearInterrupts();
+                            mcp2515->clearTXInterrupts();
+                            lastRecovery = millis();
+                        }
                     }
                 }
             }
             xSemaphoreGive(mcp2515RecoveryMutex);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        prod::g_healthMonitor.feed();
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }

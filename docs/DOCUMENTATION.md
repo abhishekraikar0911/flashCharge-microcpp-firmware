@@ -13,7 +13,7 @@ Edit `include/secrets.h`:
 ```cpp
 #define SECRET_WIFI_SSID "YourWiFi"
 #define SECRET_WIFI_PASS "YourPassword"
-#define SECRET_CHARGER_ID "RIVOT_100A_01"
+#define SECRET_CHARGER_ID "250822008C06"
 ```
 
 ---

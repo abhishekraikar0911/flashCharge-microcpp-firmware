@@ -13,6 +13,6 @@ Handler = http.server.SimpleHTTPRequestHandler
 Handler.extensions_map['.bin'] = 'application/octet-stream'
 
 with socketserver.TCPServer(("", PORT), Handler) as httpd:
-    print(f"Serving firmware at http://0.0.0.0:{PORT}/firmware.bin")
-    print(f"Use in SteVe: http://<YOUR_IP>:{PORT}/firmware.bin")
+    print(f"Serving firmware at http://0.0.0.0:{PORT}/firmware.signed.bin")
+    print(f"Use in SteVe: http://<YOUR_IP>:{PORT}/firmware.signed.bin")
     httpd.serve_forever()

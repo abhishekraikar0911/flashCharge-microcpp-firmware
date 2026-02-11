@@ -1,5 +1,9 @@
 #include "../include/security_manager.h"
+#include "../include/config/security.h"
 #include <Arduino.h>
+#include <string.h>
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/pk.h>
 
 namespace prod
 {
@@ -84,18 +88,78 @@ namespace prod
         Serial.println("[Security] ✅ OTA space verified");
         return true;
     }
-
-    bool SecurityManager::verifyOTASignature(const uint8_t *signature, size_t sigLen)
+    bool SecurityManager::verifyOTASignature(const uint8_t *hash, size_t hashLen, const uint8_t *signature, size_t sigLen)
     {
-        // TODO: Implement signature verification
-        // This requires:
-        // 1. Public key of firmware signer
-        // 2. Hash of firmware
-        // 3. Signature algorithm (RSA, ECDSA, etc.)
+        if (!hash || hashLen != 32 || !signature || sigLen != 64)
+        {
+            Serial.println("[Security] ? Invalid OTA signature input");
+            return false;
+        }
 
-        Serial.println("[Security] ⚠️  OTA signature verification not implemented");
-        return true; // Allow for now
+        mbedtls_pk_context pk;
+        mbedtls_pk_init(&pk);
+
+        int ret = mbedtls_pk_parse_public_key(
+            &pk,
+            reinterpret_cast<const unsigned char *>(OTA_PUBLIC_KEY_PEM),
+            strlen(OTA_PUBLIC_KEY_PEM) + 1);
+        if (ret != 0)
+        {
+            Serial.printf("[Security] ? Public key parse failed: -0x%04X\n", -ret);
+            mbedtls_pk_free(&pk);
+            return false;
+        }
+
+        if (!mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECKEY))
+        {
+            Serial.println("[Security] ? Public key is not EC");
+            mbedtls_pk_free(&pk);
+            return false;
+        }
+
+        mbedtls_ecdsa_context *ecdsa = mbedtls_pk_ec(pk);
+        if (!ecdsa)
+        {
+            Serial.println("[Security] ? ECDSA context not available");
+            mbedtls_pk_free(&pk);
+            return false;
+        }
+
+        mbedtls_mpi r;
+        mbedtls_mpi s;
+        mbedtls_mpi_init(&r);
+        mbedtls_mpi_init(&s);
+
+        ret = mbedtls_mpi_read_binary(&r, signature, 32);
+        if (ret == 0)
+        {
+            ret = mbedtls_mpi_read_binary(&s, signature + 32, 32);
+        }
+
+        if (ret != 0)
+        {
+            Serial.printf("[Security] ? Signature parse failed: -0x%04X\n", -ret);
+            mbedtls_mpi_free(&r);
+            mbedtls_mpi_free(&s);
+            mbedtls_pk_free(&pk);
+            return false;
+        }
+
+        ret = mbedtls_ecdsa_verify(&ecdsa->grp, hash, hashLen, &ecdsa->Q, &r, &s);
+        mbedtls_mpi_free(&r);
+        mbedtls_mpi_free(&s);
+        mbedtls_pk_free(&pk);
+
+        if (ret != 0)
+        {
+            Serial.printf("[Security] ? OTA signature invalid: -0x%04X\n", -ret);
+            return false;
+        }
+
+        Serial.println("[Security] ? OTA signature verified");
+        return true;
     }
+
 
     bool SecurityManager::validateServerCertificate()
     {

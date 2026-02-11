@@ -14,15 +14,18 @@
 
 namespace prod
 {
-
     class PersistenceManager
     {
     private:
         Preferences prefs;
         static const char *NAMESPACE;
+        bool initialized = false;
+
+        bool ensureInit();
 
     public:
         PersistenceManager();
+        bool init();
 
         // Transaction persistence
         void saveTransaction(const char *transactionId, const char *idTag);

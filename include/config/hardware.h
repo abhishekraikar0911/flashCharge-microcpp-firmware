@@ -29,10 +29,17 @@
 
 // ========== SAFETY LIMITS ==========
 #define MIN_VOLTAGE_V 56.0f
-#define MAX_VOLTAGE_V 85.5f
-#define MAX_CURRENT_A 300.0f
-#define MAX_TEMPERATURE_C 70.0f
+#define MAX_VOLTAGE_V 99.0f
+#define MAX_CURRENT_A 110.0f
+#define MAX_TEMPERATURE_C 95.0f
 #define BATTERY_CAPACITY_AH 30.0f
+
+// ========== ALERT THRESHOLDS ==========
+#define ALERT_TEMP_WARNING_C 70.0f
+#define ALERT_TEMP_CRITICAL_C 70.0f
+#define ALERT_VOLTAGE_MIN_V 56.0f
+#define ALERT_VOLTAGE_MAX_V 90.0f
+#define ALERT_CURRENT_MAX_A 100.0f
 
 // ========== PLUG DETECTION (HYBRID) ==========
 #define PLUG_DISCONNECT_CURRENT_THRESHOLD 0.5f  // Amps

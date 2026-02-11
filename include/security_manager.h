@@ -64,9 +64,9 @@ namespace prod
         bool prepareOTA(size_t totalSize);
 
         /**
-         * Verify OTA signature (placeholder for signature validation)
+         * Verify OTA signature using precomputed firmware hash
          */
-        bool verifyOTASignature(const uint8_t *signature, size_t sigLen);
+        bool verifyOTASignature(const uint8_t *hash, size_t hashLen, const uint8_t *signature, size_t sigLen);
 
         /**
          * Check server certificate validity

@@ -63,6 +63,7 @@ bool ocppInitialized = false;
 bool transactionActive = false;      // TRUE only when valid transaction running
 int activeTransactionId = -1;        // Valid transaction ID (>0)
 bool remoteStartAccepted = false;    // TRUE only after RemoteStart accepted
+char persistedIdTag[32] = {0};      // Restored IdTag for library re-hydration
 
 // Buffers
 uint8_t lastData[8] = {0};

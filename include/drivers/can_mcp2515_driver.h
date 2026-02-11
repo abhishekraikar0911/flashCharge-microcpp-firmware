@@ -108,4 +108,10 @@ namespace CAN_MCP2515
      */
     bool isHealthy();
 
+    /**
+     * @brief Read MCP2515 registers for diagnostics
+     * @return true if SPI communication working
+     */
+    bool readDiagnostics();
+
 } // namespace CAN_MCP2515

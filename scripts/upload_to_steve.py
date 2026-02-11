@@ -8,15 +8,15 @@ from datetime import datetime, timedelta
 STEVE_URL = "https://your-steve-server.com"  # Change this
 STEVE_USER = "admin"
 STEVE_PASS = "admin"
-CHARGER_ID = "RIVOT_100A_01"
-FIRMWARE_PATH = "../.pio/build/charger_esp32_production/firmware.bin"
+CHARGER_ID = "250822008C06"
+FIRMWARE_PATH = "../.pio/build/charger_esp32_production/firmware.signed.bin"
 
 def upload_firmware():
     """Upload firmware binary to SteVe server"""
     print(f"[1/3] Uploading {FIRMWARE_PATH} to SteVe...")
     
     with open(FIRMWARE_PATH, 'rb') as f:
-        files = {'file': ('firmware.bin', f, 'application/octet-stream')}
+        files = {'file': ('firmware.signed.bin', f, 'application/octet-stream')}
         response = requests.post(
             f"{STEVE_URL}/steve/manager/firmware/upload",
             files=files,

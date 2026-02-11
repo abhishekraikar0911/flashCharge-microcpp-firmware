@@ -163,6 +163,31 @@ pio device monitor --baud 115200
 
 ## 🎮 Usage
 
+### Debug Menu (NEW!)
+
+Serial monitor now shows a numbered debug menu:
+
+```
+========== DEBUG MENU ==========
+1 - BMS <--> MCU
+2 - MCU <--> Charger Module
+3 - OCPP Client
+4 - WiFi
+5 - State Machine
+6 - System
+0 - Debug ALL
+9 - Stop Debug
+================================
+```
+
+**Quick Start**:
+- Press `1-6` to debug specific section
+- Press `0` to debug everything
+- Press `9` to stop debug output
+- Press `h` to show menu again
+
+See [DEBUG_MENU.md](DEBUG_MENU.md) for detailed guide.
+
 ### Serial Console Commands
 
 Once running, use serial monitor (115200 baud):
@@ -248,6 +273,17 @@ The system reports status every 10 seconds:
 ```bash
 pio run --target erase
 pio run --target upload
+```
+
+### Invalid Transaction ID (-1)
+
+```
+[PERSIST] Restored transaction: -1
+```
+**Solution**: One-time NVS cleanup (already fixed in v2.4.0+):
+```bash
+pio run --target erase  # Clear old NVS data
+pio run -e charger_esp32_production --target upload
 ```
 
 ## 🔐 Security Notes

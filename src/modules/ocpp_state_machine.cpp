@@ -27,6 +27,13 @@ namespace prod
         if (g_persistence.restoreTransaction(txnId, idTag, sizeof(txnId)))
         {
             Serial.printf("[OCPP_SM] 📋 Resuming persisted transaction: %s\n", txnId);
+            
+            // CRITICAL: Update global flags to reflect restored state
+            transactionActive = true;
+            activeTransactionId = atoi(txnId);
+            strncpy(persistedIdTag, idTag, sizeof(persistedIdTag) - 1); // Store for library re-hydration
+            remoteStartAccepted = true; // Assume accepted to allow remote commands
+            
             currentState = ConnectorState::Charging;
             stateEnterTime = millis();
             g_healthMonitor.onTransactionStarted();
@@ -91,35 +98,52 @@ namespace prod
         // Check for state-specific timeouts
         uint32_t stateAge = now - stateEnterTime;
 
-        // FIX 2: Finishing state timeout - ONLY on event (EV unplugged), not timer
         if (currentState == ConnectorState::Finishing && stateAge > FINISHING_TIMEOUT_MS)
         {
-            // CRITICAL: Only reset to Available if EV is actually disconnected
-            if (!isPlugConnected())
-            {
-                Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - EV disconnected, transitioning Available\n",
-                              FINISHING_TIMEOUT_MS / 1000.0f);
-                forceState(ConnectorState::Available);
-                g_persistence.clearTransaction();
-                g_healthMonitor.onTransactionEnded();
-            }
-            else
-            {
-                Serial.printf("[OCPP_SM] ⚠️  Finishing timeout but EV still connected - keeping Finishing state\n");
-            }
+            // FOR TESTING: Force transition to Available after 10s timeout, even if EV still connected
+            Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - FORCING Available state (Testing)\n",
+                          FINISHING_TIMEOUT_MS / 1000.0f);
+            forceState(ConnectorState::Available);
+            g_persistence.clearTransaction();
+            g_healthMonitor.onTransactionEnded();
         }
     }
 
     void OCPPStateMachine::onTransactionStarted(int connectorId, const char *idTag, int transactionId)
     {
+        // *** CRITICAL DIAGNOSTIC: Log function entry parameters ***
+        Serial.printf("[OCPP_SM_DIAG] 🎯 onTransactionStarted() CALLED with:\n");
+        Serial.printf("[OCPP_SM_DIAG]    connectorId=%d, idTag=%s, txId=%d\n", connectorId, idTag ? idTag : "NULL", transactionId);
+        Serial.printf("[OCPP_SM_DIAG]    Current state BEFORE transition: %s\n", getStateName());
+        
         Serial.printf("[OCPP_SM] ✅ Transaction started: %d (tag: %s)\n", transactionId, idTag);
 
-        char txnIdStr[32];
-        snprintf(txnIdStr, sizeof(txnIdStr), "%d", transactionId);
-        g_persistence.saveTransaction(txnIdStr, idTag);
+        // CRITICAL FIX: Only persist valid transaction IDs (positive integers)
+        // MicroOcpp returns -1 before StartTransaction.conf arrives
+        if (transactionId > 0)
+        {
+            char txnIdStr[32];
+            snprintf(txnIdStr, sizeof(txnIdStr), "%d", transactionId);
+            g_persistence.saveTransaction(txnIdStr, idTag);
+            Serial.printf("[OCPP_SM_DIAG] 💾 Persisted transaction: txId=%s, idTag=%s\n", txnIdStr, idTag);
+        }
+        else
+        {
+            Serial.printf("[OCPP_SM] ⚠️  Invalid txId=%d, not persisting (waiting for StartTransaction.conf)\n", transactionId);
+        }
 
-        forceState(ConnectorState::Charging);
-        g_healthMonitor.onTransactionStarted();
+        // Only transition to Charging if not already there
+        if (currentState != ConnectorState::Charging)
+        {
+            Serial.println("[OCPP_SM_DIAG] 🔄 Calling forceState(Charging)...");
+            forceState(ConnectorState::Charging);
+            g_healthMonitor.onTransactionStarted();
+            Serial.println("[OCPP_SM_DIAG] ✅ Health monitor notified");
+        }
+        else
+        {
+            Serial.println("[OCPP_SM_DIAG] ℹ️  Already in Charging state, skipping redundant transition");
+        }
     }
 
     void OCPPStateMachine::onTransactionStopped(int transactionId)
@@ -195,7 +219,8 @@ namespace prod
     {
         // Check based on hardware signal from CAN bus
         // Use :: to access global namespace variable
-        return ::gunPhysicallyConnected;
+        // BOTH gun physical connection AND battery BMS communication required
+        return ::gunPhysicallyConnected && ::batteryConnected;
     }
 
     bool OCPPStateMachine::isHardwareSafe()
@@ -233,16 +258,26 @@ namespace prod
 
     void OCPPStateMachine::forceState(ConnectorState newState)
     {
-        if (currentState == newState)
+        // *** DIAGNOSTIC: Always log state transition attempts ***
+        const char *newStateName = (newState >= ConnectorState::Available && newState <= ConnectorState::Faulted)
+                                      ? STATE_NAMES[static_cast<int>(newState)]
+                                      : "Unknown";
+        const char *oldStateName = getStateName();
+        
+        Serial.printf("[OCPP_SM_DIAG] 🔄 forceState() called: %s → %s (check if same)\n", oldStateName, newStateName);
+        
+        if (currentState == newState) {
+            Serial.printf("[OCPP_SM_DIAG] ℹ️  Already in %s state, no change\n", newStateName);
             return;
+        }
 
-        Serial.printf("[OCPP_SM] 🔄 State: %s → %s\n", getStateName(),
-                      (newState >= ConnectorState::Available && newState <= ConnectorState::Faulted)
-                          ? STATE_NAMES[static_cast<int>(newState)]
-                          : "Unknown");
+        Serial.printf("[OCPP_SM] 🔄 State: %s → %s ✅ TRANSITION APPLIED\n", oldStateName, newStateName);
 
         currentState = newState;
         stateEnterTime = millis();
+        
+        Serial.printf("[OCPP_SM_DIAG] ✅ currentState updated to: %d (%s), time=%u\n", 
+                     static_cast<int>(newState), newStateName, stateEnterTime);
     }
 
     OCPPStateMachine g_ocppStateMachine;

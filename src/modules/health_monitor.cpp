@@ -11,20 +11,37 @@ namespace prod
         if (watchdogInitialized)
             return;
 
+        Serial.printf("[Health] 🛡️  Initializing Watchdog (%u seconds)...\n", WATCHDOG_TIMEOUT_SECONDS);
+
+        // Initialize ESP32 Task Watchdog Timer (TWDT)
+        esp_err_t err = esp_task_wdt_init(WATCHDOG_TIMEOUT_SECONDS, true); // Panic on timeout
+        if (err != ESP_OK) {
+            Serial.printf("[Health] ❌ Watchdog init failed: %s\n", esp_err_to_name(err));
+            return;
+        }
+
         watchdogInitialized = true;
         lastWiFiConnectTime = millis();
         lastHealthCheck = millis();
-        Serial.println("[Health] ⚠️  Watchdog disabled (causing boot loops)");
+        Serial.println("[Health] ✅ Watchdog active (Panic level)");
     }
     
     void HealthMonitor::addTaskToWatchdog(TaskHandle_t task, const char* taskName)
     {
-        Serial.printf("[Health] ⚠️  Watchdog disabled - %s not registered\n", taskName);
+        if (!watchdogInitialized) return;
+
+        esp_err_t err = esp_task_wdt_add(task);
+        if (err == ESP_OK) {
+            Serial.printf("[Health] 🔗 Task '%s' added to watchdog\n", taskName);
+        } else {
+            Serial.printf("[Health] ❌ Failed to add task '%s': %s\n", taskName, esp_err_to_name(err));
+        }
     }
 
     void HealthMonitor::feed()
     {
-        // Watchdog disabled
+        if (!watchdogInitialized) return;
+        esp_task_wdt_reset();
     }
 
     void HealthMonitor::poll()
