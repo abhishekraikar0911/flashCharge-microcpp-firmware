@@ -186,7 +186,7 @@ Serial monitor now shows a numbered debug menu:
 - Press `9` to stop debug output
 - Press `h` to show menu again
 
-See [DEBUG_MENU.md](DEBUG_MENU.md) for detailed guide.
+See [Debug Menu Guide](docs/guides/DEBUG_MENU.md) for detailed guide.
 
 ### Serial Console Commands
 
@@ -224,6 +224,16 @@ The system reports status every 10 seconds:
 - `WiFi: ✅` - Connected to WiFi network
 - `OCPP: Connected` - WebSocket connected to OCPP server
 - `State: Available/Preparing/Charging/Finishing` - Connector state
+
+## 📚 Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
+
+- **[API Reference](docs/api/)** - OCPP messages and data transmission
+- **[Guides](docs/guides/)** - Setup, deployment, and testing guides  
+- **[Troubleshooting](docs/troubleshooting/)** - Common issues and fixes
+
+See [Documentation Index](docs/README.md) for complete list.
 
 ## 🔧 Troubleshooting
 

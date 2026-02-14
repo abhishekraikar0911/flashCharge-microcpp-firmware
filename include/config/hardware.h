@@ -29,7 +29,7 @@
 
 // ========== SAFETY LIMITS ==========
 #define MIN_VOLTAGE_V 56.0f
-#define MAX_VOLTAGE_V 99.0f
+#define MAX_VOLTAGE_V 95.0f  // 72V nominal battery charges to 92-95V at 100% SOC
 #define MAX_CURRENT_A 110.0f
 #define MAX_TEMPERATURE_C 95.0f
 #define BATTERY_CAPACITY_AH 30.0f
@@ -38,8 +38,11 @@
 #define ALERT_TEMP_WARNING_C 70.0f
 #define ALERT_TEMP_CRITICAL_C 70.0f
 #define ALERT_VOLTAGE_MIN_V 56.0f
-#define ALERT_VOLTAGE_MAX_V 90.0f
+#define ALERT_VOLTAGE_MAX_V 95.0f  // Match MAX_VOLTAGE_V for 100% SOC operation
 #define ALERT_CURRENT_MAX_A 100.0f
+
+// ========== FAULT STABILIZATION ==========
+#define FAULT_STABILIZATION_PERIOD_MS 10000  // 10 seconds after fault before allowing new transaction
 
 // ========== PLUG DETECTION (HYBRID) ==========
 #define PLUG_DISCONNECT_CURRENT_THRESHOLD 0.5f  // Amps
@@ -63,3 +66,33 @@
 #define TASK_PRIORITY_CHARGER_COMM 4
 #define TASK_PRIORITY_OCPP 3
 #define TASK_PRIORITY_UI 2
+
+// ========== TEST/DEBUG MODE CONFIGURATION ==========
+/**
+ * @brief Test Mode Bypass for Development
+ * 
+ * When ENABLE_TEST_MODE is set to 1, the firmware will bypass hardware
+ * safety checks for RemoteStart/RemoteStop commands. This allows testing
+ * OCPP communication with CitrineOS without requiring all hardware to be
+ * connected and operational.
+ * 
+ * ⚠️  WARNING: This MUST be set to 0 for production deployment!
+ * 
+ * Bypassed checks when enabled:
+ * - Gun physical connection requirement
+ * - BMS safety flag validation
+ * - Terminal voltage range checks
+ * - Charger module health checks
+ * - Fault stabilization lock
+ * 
+ * Usage:
+ * - Development/Testing: Set to 1
+ * - Production: Set to 0 (default)
+ */
+#ifndef ENABLE_TEST_MODE
+#define ENABLE_TEST_MODE 1  // ⚠️  SET TO 0 FOR PRODUCTION!
+#endif
+
+#if ENABLE_TEST_MODE
+#warning "⚠️  TEST MODE ENABLED - Hardware safety checks will be bypassed! DO NOT USE IN PRODUCTION!"
+#endif

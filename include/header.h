@@ -83,6 +83,12 @@ extern bool sessionActive;
 extern bool ocppInitialized;
 
 // =========================================================
+// FAULT STABILIZATION GUARD (Production Safety)
+// =========================================================
+extern bool faultLockActive;        // TRUE when fault occurred, blocks new RemoteStart
+extern unsigned long faultLockTime; // Timestamp when fault lock was set
+
+// =========================================================
 // TRANSACTION GATE (FIX 1 - HARD GATE)
 // =========================================================
 extern bool transactionActive;      // TRUE only when valid transaction running

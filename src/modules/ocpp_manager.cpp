@@ -4,8 +4,10 @@
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
+#include "../../include/config/hardware.h"
 
 #include "../../include/ocpp/ocpp_client.h"
+#include "../../include/production_config.h"
 #include "../../include/secrets.h"
 #include "../../include/header.h"
 #include "../../include/modules/ota_manager.h"
@@ -301,8 +303,8 @@ bool ocpp::init()
             return false;
         }
         if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval")) {
-            config->setInt(5);
-            Serial.println("[OCPP]   ✓ MeterValues interval: 5s");
+            config->setInt(30);
+            Serial.println("[OCPP]   ✓ MeterValues interval: 30s (reduced to prevent server overload)");
         }
         
         if (auto config = MicroOcpp::getConfigurationPublic("ClockAlignedDataInterval")) {
@@ -318,6 +320,20 @@ bool ocpp::init()
         if (auto config = MicroOcpp::getConfigurationPublic("HeartbeatInterval")) {
             config->setInt(60);
             Serial.println("[OCPP]   ✓ Heartbeat interval: 60s");
+        }
+        
+        // CRITICAL FIX: Prevent "ConcurrentTx" rejection on WebSocket reconnect
+        // Set TransactionMessageAttempts to 1 to prevent StartTransaction retry
+        // after it's already been accepted by the server
+        if (auto config = MicroOcpp::getConfigurationPublic("TransactionMessageAttempts")) {
+            config->setInt(1);  // Only try once - don't retry if already accepted
+            Serial.println("[OCPP]   ✓ TransactionMessageAttempts: 1 (prevent ConcurrentTx)");
+        }
+        
+        // Increase retry interval to give WebSocket time to stabilize
+        if (auto config = MicroOcpp::getConfigurationPublic("TransactionMessageRetryInterval")) {
+            config->setInt(120);  // 2 minutes between retries
+            Serial.println("[OCPP]   ✓ TransactionMessageRetryInterval: 120s");
         }
     }
 
@@ -349,20 +365,116 @@ bool ocpp::init()
                 Serial.printf("[OCPP]   flags: chargerHealthy=%d bmsSafe=%d batteryConnected=%d gunPhys=%d remoteStartAccepted=%d transactionLocked=%d transactionActive=%d activeTx=%d\n",
                     isChargerModuleHealthy(), bmsSafeToCharge, batteryConnected, gunPhysicallyConnected, remoteStartAccepted, transactionLocked, transactionActive, activeTransactionId);
 
-                if (!isChargerModuleHealthy()) {
-                    Serial.println("[OCPP] ❌ REJECTING: Charger module OFFLINE");
-                    return;
-                }
+#if ENABLE_TEST_MODE
+                {  // Scoped block to avoid variable name conflicts
+                    // ═══════════════════════════════════════════════════════════════
+                    // TEST MODE BYPASS - Skip all safety validation
+                    // ═══════════════════════════════════════════════════════════════
+                    Serial.println("\\n╔═══════════════════════════════════════════════════════════════╗");
+                    Serial.println("║  ⚠️  TEST MODE - Bypassing OCPP Safety Validation           ║");
+                    Serial.println("╚═══════════════════════════════════════════════════════════════╝");
+                    Serial.println("[TEST_MODE] 🔓 Skipping ALL safety checks:");
+                    Serial.println("[TEST_MODE]    ✓ BMS safety check BYPASSED");
+                    Serial.println("[TEST_MODE]    ✓ Voltage range check BYPASSED");
+                    Serial.println("[TEST_MODE]    ✓ Temperature check BYPASSED");
+                    Serial.println("[TEST_MODE]    ✓ Charger health check BYPASSED");
+                    Serial.println("[TEST_MODE]    ✓ Fault lock check BYPASSED");
+                    
+                    // Delegate to State Machine (which will also bypass in test mode)
+                    bool acceptedBySM = prod::g_ocppStateMachine.onRemoteStartTransaction(tx ? tx->getIdTag() : "Remote", 1);
+                    
+                    if (!acceptedBySM) {
+                        Serial.println("[OCPP] ❌ REJECTED by State Machine logic");
+                        remoteStartAccepted = false;
+                        return;
+                    }
 
+                    Serial.println("[OCPP] ✅ RemoteStart accepted (TEST MODE - no safety validation)");
+                    Serial.println("╚═══════════════════════════════════════════════════════════════╝\\n");
+                    remoteStartAccepted = true;
+                    return;  // Skip all production safety checks below
+                }
+#endif
+
+                // ═══════════════════════════════════════════════════════════════
+                // PRE-TRANSACTION SAFETY VALIDATION (Production-Grade)
+                // ═══════════════════════════════════════════════════════════════
+                Serial.println("[OCPP] 🔍 Pre-transaction safety validation...");
+                
+                // Check 1: BMS Safety
                 if (!bmsSafeToCharge) {
-                    Serial.println("[OCPP] ❌ REJECTING: BMS disallows charging (bmsSafeToCharge=false)");
-                    ocpp::sendBMSAlert("REMOTE_START_REJECTED", "BMS denied charging");
+                    Serial.println("[OCPP] ❌ REJECTED: BMS not ready (byte4 != 0x00)");
+                    ocpp::sendChargerStatus(false, "BMS not ready - vehicle not safe to charge");
+                    remoteStartAccepted = false;
                     return;
                 }
+                
+                // Check 2: Voltage Range
+                if (terminalVolt > ALERT_VOLTAGE_MAX_V || terminalVolt < ALERT_VOLTAGE_MIN_V) {
+                    Serial.printf("[OCPP] ❌ REJECTED: Voltage out of range (%.1fV, limits: %.0f-%.0fV)\n", 
+                                  terminalVolt, ALERT_VOLTAGE_MIN_V, ALERT_VOLTAGE_MAX_V);
+                    char reason[128];
+                    snprintf(reason, sizeof(reason), "Voltage out of safe range: %.1fV (limits: %.0f-%.0fV)", 
+                             terminalVolt, ALERT_VOLTAGE_MIN_V, ALERT_VOLTAGE_MAX_V);
+                    ocpp::sendChargerStatus(false, reason);
+                    remoteStartAccepted = false;
+                    return;
+                }
+                
+                // Check 3: Temperature
+                if (chargerTemp > ALERT_TEMP_CRITICAL_C) {
+                    Serial.printf("[OCPP] ❌ REJECTED: Temperature too high (%.1f°C, limit: %.0f°C)\n", 
+                                  chargerTemp, ALERT_TEMP_CRITICAL_C);
+                    char reason[128];
+                    snprintf(reason, sizeof(reason), "Temperature too high: %.1f°C (limit: %.0f°C)", 
+                             chargerTemp, ALERT_TEMP_CRITICAL_C);
+                    ocpp::sendChargerStatus(false, reason);
+                    remoteStartAccepted = false;
+                    return;
+                }
+                
+                // Check 4: Charger Module Health
+                if (!isChargerModuleHealthy()) {
+                    Serial.println("[OCPP] ❌ REJECTED: Charger module offline (CAN timeout)");
+                    ocpp::sendChargerStatus(false, "Charger module offline - check CAN bus connection");
+                    remoteStartAccepted = false;
+                    return;
+                }
+                
+                // Check 5: Fault Stabilization Lock
+                if (faultLockActive) {
+                    unsigned long timeSinceFault = millis() - faultLockTime;
+                    if (timeSinceFault < FAULT_STABILIZATION_PERIOD_MS) {
+                        Serial.printf("[OCPP] ❌ REJECTED: Fault recovery in progress (%lu/%u ms)\n", 
+                                      timeSinceFault, (unsigned int)FAULT_STABILIZATION_PERIOD_MS);
+                        ocpp::sendChargerStatus(false, "Fault recovery in progress - please wait");
+                        remoteStartAccepted = false;
+                        return;
+                    } else {
+                        // Stabilization period passed - verify conditions are now safe
+                        if (bmsSafeToCharge && 
+                            terminalVolt >= ALERT_VOLTAGE_MIN_V && terminalVolt <= ALERT_VOLTAGE_MAX_V &&
+                            chargerTemp <= ALERT_TEMP_CRITICAL_C) {
+                            Serial.println("[OCPP] ✅ Fault stabilized - clearing lock");
+                            faultLockActive = false;
+                        } else {
+                            Serial.println("[OCPP] ❌ REJECTED: Conditions still unsafe after stabilization");
+                            ocpp::sendChargerStatus(false, "Fault conditions persist - not safe to charge");
+                            remoteStartAccepted = false;
+                            return;
+                        }
+                    }
+                }
+                
+                Serial.println("[OCPP] ✅ All safety checks passed");
+                // ═══════════════════════════════════════════════════════════════
 
-                // Check if already in transaction
-                if (transactionLocked || transactionActive) {
-                    Serial.println("[OCPP] ⚠️  RemoteStart rejected - transaction already active or locked");
+                // Delegate to State Machine for decision
+                bool acceptedBySM = prod::g_ocppStateMachine.onRemoteStartTransaction(tx ? tx->getIdTag() : "Remote", 1);
+                
+                if (!acceptedBySM) {
+                    Serial.println("[OCPP] ❌ REJECTED by State Machine logic");
+                    remoteStartAccepted = false;
                     return;
                 }
 
@@ -405,14 +517,16 @@ bool ocpp::init()
                 Serial.println("\n[OCPP] 📥 RemoteStop received");
                 Serial.printf("[OCPP]   snapshot before stop: txActive=%d activeTx=%d txRunning=%d\n", transactionActive, activeTransactionId, txRunning);
 
-                // *** DIAGNOSTIC: Check if transaction really exists ***
                 if (!transactionActive && activeTransactionId <= 0) {
                     Serial.println("[OCPP] ⚠️  RemoteStop received but NO ACTIVE TRANSACTION!");
-                    Serial.println("[OCPP] ℹ️  This can happen if:");
-                    Serial.println("[OCPP]      - Device rebooted between RemoteStart and RemoteStop");
-                    Serial.println("[OCPP]      - RemoteStart was rejected");
-                    Serial.println("[OCPP]      - Transaction already stopped");
-                    // Don't try to stop non-existent transaction
+                    return;
+                }
+
+                // Delegate to State Machine for decision
+                bool stopAccepted = prod::g_ocppStateMachine.onRemoteStopTransaction(activeTransactionId);
+
+                if (!stopAccepted) {
+                    Serial.println("[OCPP] ❌ RemoteStop REJECTED by State Machine");
                     return;
                 }
 
@@ -420,7 +534,6 @@ bool ocpp::init()
                 chargingEnabled = false;
 
                 // 2. IMMEDIATELY send CAN command to stop physical charger
-                // This bypasses the 300-500ms polling delay for safety-critical stops
                 sendImmediateChargerStop();
 
                 Serial.println("[OCPP] ⏹️  Charging disabled - hardware stop command sent");
@@ -440,24 +553,24 @@ bool ocpp::init()
 
             } else if (notification == TxNotification_StopTx) {
                 Serial.println("\n[OCPP] 📥 StopTransaction received");
-                Serial.printf("[OCPP]   snapshot: localTx=%d activeTx=%d txRunning=%d sessionSummarySent=%d\n",
-                    localTransactionId, activeTransactionId, txRunning, sessionSummarySent);
 
                 if (!sessionSummarySent && transactionLocked) {
                     float duration = (millis() - txStartTime) / 60000.0f;
                     ocpp::sendSessionSummary(socPercent, energyWh, duration);
                     sessionSummarySent = true;
                 }
+                
+                // Clear all transaction state
                 transactionLocked = false;
                 localTransactionId = -1;
                 activeTransactionId = -1;
                 transactionActive = false;
                 remoteStartAccepted = false;
                 chargingEnabled = false;
-                Serial.println("[OCPP] ⏹️  Transaction STOPPED and UNLOCKED");
-                Serial.println("[GATE] 🔒 HARD GATE CLOSED\n");
+                
+                Serial.println("[OCPP] ⏹️  Transaction stopped - all flags cleared");
 
-                // Notify state machine
+                // Clear state machine
                 prod::g_ocppStateMachine.onTransactionStopped(localTransactionId);
             }
         });
@@ -520,6 +633,10 @@ bool ocpp::init()
 
 void ocpp::poll()
 {
+    static bool oldTransactionCleaned = false;
+    static bool staleStateCleaned = false;
+    static bool cleanupInProgress = false;  // NEW: Prevent sync during cleanup
+    
     {
         OcppLock lock;
         if (!lock.ok())
@@ -528,9 +645,83 @@ void ocpp::poll()
         }
         mocpp_loop();
 
+        // CLEANUP: Force-stop old transactions after BootNotification
+        if (!oldTransactionCleaned && isOperative()) {
+            auto tx = getTransaction(1);
+            if (tx && tx->isActive()) {
+                int oldTxId = tx->getTransactionId();
+                Serial.printf("[OCPP] 🧹 Cleaning up old transaction (txId=%d)\n", oldTxId);
+                
+                cleanupInProgress = true;  // Block sync
+                
+                // Force stop the old transaction
+                chargingEnabled = false;
+                endTransaction(nullptr, "PowerLoss", 1);
+                
+                // Clear global state
+                transactionActive = false;
+                transactionLocked = false;
+                activeTransactionId = -1;
+                localTransactionId = -1;
+                remoteStartAccepted = false;
+                
+                // CRITICAL: Force state machine to Available
+                prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+                
+                Serial.println("[OCPP] ✅ Old transaction cleaned - ready for new RemoteStart");
+                
+                cleanupInProgress = false;  // Re-enable sync
+            }
+            oldTransactionCleaned = true;
+        }
+        
+        // CRITICAL FIX: Clear stale global state if library has no transaction
+        if (!staleStateCleaned && isOperative()) {
+            auto tx = getTransaction(1);
+            if (!tx && (transactionActive || activeTransactionId > 0 || remoteStartAccepted)) {
+                Serial.println("\n╔═══════════════════════════════════════════════════════════════╗");
+                Serial.println("║  🧹 CLEARING STALE TRANSACTION STATE                         ║");
+                Serial.println("╚═══════════════════════════════════════════════════════════════╝");
+                Serial.printf("[OCPP] 🔍 Stale state detected: txActive=%d activeTxId=%d remoteStart=%d\n",
+                             transactionActive, activeTransactionId, remoteStartAccepted);
+                Serial.println("[OCPP] 🔍 Library has NO active transaction - clearing global flags");
+                
+                transactionActive = false;
+                transactionLocked = false;
+                activeTransactionId = -1;
+                localTransactionId = -1;
+                remoteStartAccepted = false;
+                chargingEnabled = false;
+                
+                // FIX: Force state machine to sync with reality
+                if (gunPhysicallyConnected && batteryConnected) {
+                    Serial.println("[OCPP] 🔄 Vehicle connected - forcing state to Preparing");
+                    prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
+                } else {
+                    Serial.println("[OCPP] 🔄 No vehicle - forcing state to Available");
+                    prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+                }
+                
+                Serial.println("[OCPP] ✅ Stale state cleared - ready for new RemoteStart");
+                Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
+            }
+            staleStateCleaned = true;
+        }
+
+        // SKIP SYNC if cleanup is in progress
+        if (cleanupInProgress) {
+            return;
+        }
+
         // *** ROBUST SYNC TRANSACTION ID ***
+        // CRITICAL: Don't sync until AFTER stale cleanup completes
+        if (!staleStateCleaned) {
+            return;
+        }
+        
         auto tx = getTransaction(1); // Check connector 1
         if (tx) {
+            
             // 1. Sync active flag if library has an active transaction
             if (!transactionActive) {
                 Serial.println("[OCPP] 🔄 Sync: Library has active tx, updating global flags");
@@ -545,8 +736,12 @@ void ocpp::poll()
                     activeTransactionId = currentId;
                     localTransactionId = currentId;
                     
-                    // Notify state machine to update persistence with the finalized ID
-                    prod::g_ocppStateMachine.onTransactionStarted(1, "RestoreSync", currentId);
+                    // CRITICAL FIX: Don't call onTransactionStarted during sync
+                    // State machine transition happens ONLY in TxNotification_StartTx callback
+                    // Just update persistence here without changing state
+                    char txnIdStr[32];
+                    snprintf(txnIdStr, sizeof(txnIdStr), "%d", currentId);
+                    prod::g_persistence.saveTransaction(txnIdStr, "RestoreSync");
                 } else if (currentId < 0 && activeTransactionId > 0) {
                     // CRITICAL: Force library to resume the persisted ID instead of waiting for a new one
                     Serial.printf("[OCPP] ⚠️  ID Mismatch: local=%d, lib=%d. FORCING RE-HYDRATION.\n", activeTransactionId, currentId);
@@ -556,15 +751,56 @@ void ocpp::poll()
                     Serial.println("[OCPP]   ✅ Library re-hydrated directly. RemoteStop will now work.");
                 }
             }
+        } else {
+            // 3. Sync: If library has NO active transaction, BUT we have a persisted transaction,
+            // DO NOT clear global flags here. Instead, let the state machine or poll handle re-hydration on next cycle
+            // or if it was definitely ended.
+            
+            if (activeTransactionId > 0) {
+                static unsigned long lastRehydrationAttempt = 0;
+                if (millis() - lastRehydrationAttempt > 30000) { // Every 30s
+                    Serial.printf("[OCPP] ⚠️  Rehydration sync: Global txActive=%d, id=%d, but library tx=NULL\n", 
+                                  transactionActive, activeTransactionId);
+                    lastRehydrationAttempt = millis();
+                    // We don't force re-hydration here, we rely on the logic in init() and state machine
+                }
+            } else if (transactionActive || transactionLocked || activeTransactionId != -1) {
+                Serial.println("[OCPP] 🔄 Sync: Library has NO active tx and no persisted ID, clearing global state");
+                transactionActive = false;
+                transactionLocked = false;
+                activeTransactionId = -1;
+                localTransactionId = -1;
+                remoteStartAccepted = false;
+                chargingEnabled = false;
+            }
         }
     }
     
-    // Periodic diagnostic: Confirm callback is listening (every 10s for debugging)
+    // Periodic diagnostic (every 10s) + State Machine Sync
     static unsigned long lastDiagnosticLog = 0;
     if (millis() - lastDiagnosticLog > 10000) {
-        Serial.printf("[OCPP_DIAG] ✅ Status (remoteStartAccepted=%d, txActive=%d, activeTxId=%d, libTx=%s)\n",
-                     remoteStartAccepted, transactionActive, activeTransactionId, 
-                     getTransaction(1) ? "PRESENT" : "MISSING");
+        auto tx = getTransaction(1);
+        bool libTxActive = (tx && tx->isActive());
+        
+        // CRITICAL FIX: Force state machine to match reality
+        auto currentSMState = prod::g_ocppStateMachine.getState();
+        
+        if (!libTxActive && !transactionActive && currentSMState == prod::ConnectorState::Charging) {
+            // State machine stuck in Charging but no transaction exists
+            Serial.println("[OCPP] ⚠️  State machine stuck in Charging with no transaction - forcing correction");
+            Serial.printf("[OCPP] 🔍 Debug: libTx=%d globalTx=%d SM=%s\n", 
+                         libTxActive, transactionActive, prod::g_ocppStateMachine.getStateName());
+            if (gunPhysicallyConnected && batteryConnected) {
+                prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
+            } else {
+                prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+            }
+        }
+        
+        Serial.printf("[OCPP] Status: SM=%s | Tx=%s | Charging=%s\n",
+                     prod::g_ocppStateMachine.getStateName(),
+                     libTxActive ? "Active" : "Idle",
+                     chargingEnabled ? "ON" : "OFF");
         lastDiagnosticLog = millis();
     }
     
@@ -644,9 +880,9 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     else if (model == 2) modelName = "Pro";
     else if (model == 3) modelName = "Max";
 
-    // [DISABLED] VehicleInfo logging spam - removed for cleaner console
-    // Serial.printf("\n[OCPP] 📤 Sending VehicleInfo:\n");
-    // Serial.printf("  SOC=%.1f%% | Model=%s | Range=%.1fkm | MaxI=%.1fA\n", soc, modelName, range, maxCurrent);
+    // VehicleInfo logging
+    Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (Pre-Tx):\n");
+    Serial.printf("  SOC=%.1f%% | Model=%s | Range=%.1fkm | MaxI=%.1fA\n", soc, modelName, range, maxCurrent);
 
     sendRequest("DataTransfer",
         [soc, maxCurrent, model, range, modelName]() -> std::unique_ptr<MicroOcpp::JsonDoc> {

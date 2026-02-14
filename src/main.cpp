@@ -338,7 +338,6 @@ void loop()
 
     // HYBRID PLUG DISCONNECT DETECTION (Option 4)
     static unsigned long lastPlugCheck = 0;
-    static unsigned long zeroCurrentStart = 0;
     static float lastVoltageCheck = 0.0f;
     static unsigned long lastVoltageTime = 0;
     
@@ -353,16 +352,16 @@ void loop()
             shouldDisconnect = true;
         }
         
-        // Method 2: Zero current timeout - ONLY during active charging AND after grace period
+        // Method 2: Zero current timeout - DISABLED (commented out)
+        /*
         static unsigned long transactionStartTime = 0;
         if (transactionActive && !chargingEnabled) {
-            transactionStartTime = millis(); // Reset grace period when transaction starts
+            transactionStartTime = millis();
         }
         
-        const unsigned long ZERO_CURRENT_GRACE_PERIOD = 30000; // 30s grace period after transaction start
+        const unsigned long ZERO_CURRENT_GRACE_PERIOD = 30000;
         bool gracePeriodExpired = (millis() - transactionStartTime) > ZERO_CURRENT_GRACE_PERIOD;
         
-        /*
         if (transactionActive && chargingEnabled && gracePeriodExpired &&
             terminalVolt > 56.0f && terminalCurr < 0.5f)
         {
@@ -410,7 +409,6 @@ void loop()
         {
             gunPhysicallyConnected = false;
             batteryConnected = false;
-            zeroCurrentStart = 0;
             Serial.println("[PLUG] ✅ Status: DISCONNECTED");
             
             // Only stop transaction if one is actually running
@@ -445,30 +443,36 @@ void loop()
     static unsigned long lastChargerStatusSent = 0;
     
     // Send when EV connected in Preparing state (waiting for user to start charging)
-    // Stop when transaction starts (RemoteStart accepted)
+    // Stop when transaction starts (actually moving to Running/Charging state)
     bool shouldSendVehicleInfo = (
         batteryConnected && 
         gunPhysicallyConnected && 
-        !transactionActive &&  // No transaction started yet
-        !ocpp::isTransactionRunningSafe(1) &&  // Double-check no active transaction
+        !ocpp::isTransactionRunningSafe(1) && 
         BMS_Imax > 0.0f && 
         terminalVolt > 56.0f &&
-        socPercent > 0.0f  // Valid SOC data
+        socPercent > 0.0f
     );
+
+    // DIAGNOSTIC for Pay-and-Charge data
+    static unsigned long lastVehicleDiag = 0;
+    if (millis() - lastVehicleDiag > 10000 && gunPhysicallyConnected) {
+        lastVehicleDiag = millis();
+        Serial.printf("[VEHICLE_DIAG] shouldSend=%d (batt=%d gun=%d !running=%d Imax=%.1f V=%.1f SOC=%.1f)\n",
+                      shouldSendVehicleInfo, batteryConnected, gunPhysicallyConnected, 
+                      !ocpp::isTransactionRunningSafe(1), BMS_Imax, terminalVolt, socPercent);
+    }
     
     if (shouldSendVehicleInfo)
     {
-        // Fast updates: 3s first time, then 5s interval for real-time data
-        unsigned long interval = firstSendDone ? 5000 : 3000;
+        // Send once immediately, then every 30s to avoid flooding server
+        unsigned long interval = firstSendDone ? 30000 : 3000;
         
-/*
         if (millis() - lastVehicleInfoSent >= interval)
         {
             ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);
             lastVehicleInfoSent = millis();
             firstSendDone = true;
         }
-*/
         
         // Send ChargerStatus ONLY when there's a blocking issue
         if (millis() - lastChargerStatusSent >= 5000)
@@ -522,17 +526,35 @@ void loop()
         {
             if (!bmsSafeToCharge)
             {
-                Serial.println("[SAFETY] 🚨 BMS CHARGING DISABLED!");
+                Serial.println("\n╔═══════════════════════════════════════════════════════════════╗");
+                Serial.println("║  🚨 EMERGENCY STOP TRIGGERED - BMS SAFETY CHECK FAILED 🚨    ║");
+                Serial.println("╚═══════════════════════════════════════════════════════════════╝");
+                Serial.printf("[SAFETY] ⏱️  Timestamp: %lu ms since boot\n", millis());
+                Serial.printf("[SAFETY] 🔍 BMS State: bmsSafeToCharge=%d (was %d)\n", bmsSafeToCharge, lastBmsSafeToCharge);
+                Serial.printf("[SAFETY] 🔍 BMS Timeout: lastBMS=%lu ms ago\n", millis() - lastBMS);
+                Serial.printf("[SAFETY] 🔍 Battery: connected=%d voltage=%.1fV current=%.1fA\n", batteryConnected, terminalVolt, terminalCurr);
+                Serial.printf("[SAFETY] 🔍 Transaction: active=%d running=%d txId=%d\n", transactionActive, ocpp::isTransactionRunningSafe(1), activeTransactionId);
+                Serial.printf("[SAFETY] 🔍 Charging: enabled=%d ocppPermits=%d\n", chargingEnabled, ocpp::ocppPermitsChargeSafe(1));
                 
                 if (transactionActive && ocpp::isTransactionRunningSafe(1))
                 {
-                    Serial.printf("[SAFETY] 🚨 EMERGENCY STOP - BMS switched OFF during charging (txId=%d)\n", activeTransactionId);
+                    Serial.printf("[SAFETY] 🚨 EMERGENCY STOP - Ending transaction (txId=%d)\n", activeTransactionId);
+                    Serial.println("[SAFETY] 📋 Reason: BMS safety flag changed during active charging");
+                    
+                    // Set fault lock to prevent immediate restart
+                    faultLockActive = true;
+                    faultLockTime = millis();
+                    Serial.println("[SAFETY] 🔒 Fault lock activated - 10s stabilization required");
+                    
                     ocpp::sendBMSAlert("BMS_EMERGENCY_STOP", "BMS disabled charging during transaction");
                     ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+                    Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
                 }
                 else
                 {
+                    Serial.println("[SAFETY] ℹ️  No active transaction - just logging BMS state change");
                     ocpp::sendBMSAlert("BMS_CHARGING_DISABLED", "BMS not ready for charging");
+                    Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
                 }
             }
             else
@@ -704,9 +726,30 @@ void loop()
     
     if (chargerTemp > ALERT_TEMP_CRITICAL_C && !tempCriticalActive) {
         Serial.printf("[TEMP] 🚨 CRITICAL: Temperature %.1f°C (limit: %.0f°C)\n", chargerTemp, ALERT_TEMP_CRITICAL_C);
+        
+        // SAFETY: Immediately stop charger hardware
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            chargingEnabled = false;
+            xSemaphoreGive(dataMutex);
+        }
+        sendImmediateChargerStop();
+        
         char msg[64];
         snprintf(msg, sizeof(msg), "Temperature: %.1f°C", chargerTemp);
         ocpp::sendSystemAlert("TEMPERATURE_CRITICAL", msg, "Critical");
+        
+        // Stop transaction if active
+        if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
+            Serial.printf("[TEMP] 🛑 Stopping transaction due to overheat (txId=%d)\n", activeTransactionId);
+            
+            // Set fault lock
+            faultLockActive = true;
+            faultLockTime = millis();
+            Serial.println("[TEMP] 🔒 Fault lock activated - 10s stabilization required");
+            
+            ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+        }
+        
         tempCriticalActive = true;
         tempWarningActive = true;
     } else if (chargerTemp > ALERT_TEMP_WARNING_C && !tempWarningActive) {
@@ -729,9 +772,30 @@ void loop()
         if ((terminalVolt > ALERT_VOLTAGE_MAX_V || terminalVolt < ALERT_VOLTAGE_MIN_V) && !voltageAlertActive) {
             Serial.printf("[VOLTAGE] 🚨 Out of range: %.1fV (range: %.0f-%.0fV)\n", 
                 terminalVolt, ALERT_VOLTAGE_MIN_V, ALERT_VOLTAGE_MAX_V);
+            
+            // SAFETY: Immediately stop charger hardware
+            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                chargingEnabled = false;
+                xSemaphoreGive(dataMutex);
+            }
+            sendImmediateChargerStop();
+            
             char msg[64];
             snprintf(msg, sizeof(msg), "Voltage: %.1fV", terminalVolt);
             ocpp::sendSystemAlert("VOLTAGE_FAULT", msg, "Critical");
+            
+            // Stop transaction if active
+            if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
+                Serial.printf("[VOLTAGE] 🛑 Stopping transaction due to voltage fault (txId=%d)\n", activeTransactionId);
+                
+                // Set fault lock
+                faultLockActive = true;
+                faultLockTime = millis();
+                Serial.println("[VOLTAGE] 🔒 Fault lock activated - 10s stabilization required");
+                
+                ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+            }
+            
             voltageAlertActive = true;
         } else if (terminalVolt >= MIN_VOLTAGE_V && terminalVolt <= MAX_VOLTAGE_V && voltageAlertActive) {
             Serial.printf("[VOLTAGE] ✅ Normal: %.1fV\n", terminalVolt);
@@ -745,9 +809,30 @@ void loop()
     
     if (terminalCurr > ALERT_CURRENT_MAX_A && !currentAlertActive) {
         Serial.printf("[CURRENT] 🚨 Overcurrent: %.1fA (limit: %.0fA)\n", terminalCurr, ALERT_CURRENT_MAX_A);
+        
+        // SAFETY: Immediately stop charger hardware
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            chargingEnabled = false;
+            xSemaphoreGive(dataMutex);
+        }
+        sendImmediateChargerStop();
+        
         char msg[64];
         snprintf(msg, sizeof(msg), "Current: %.1fA", terminalCurr);
         ocpp::sendSystemAlert("OVERCURRENT", msg, "Critical");
+        
+        // Stop transaction if active
+        if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
+            Serial.printf("[CURRENT] 🛑 Stopping transaction due to overcurrent (txId=%d)\n", activeTransactionId);
+            
+            // Set fault lock
+            faultLockActive = true;
+            faultLockTime = millis();
+            Serial.println("[CURRENT] 🔒 Fault lock activated - 10s stabilization required");
+            
+            ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+        }
+        
         currentAlertActive = true;
     } else if (terminalCurr < MAX_CURRENT_A && currentAlertActive) {
         Serial.printf("[CURRENT] ✅ Normal: %.1fA\n", terminalCurr);

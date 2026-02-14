@@ -90,7 +90,7 @@ static void decode_0681817E(const twai_message_t &msg)
             memcpy(lastImaxData, msg.data, dlc > 8 ? 8 : dlc);
             Charger_Imax = raw / 30.5f;
         }
-        if (Charger_Vmax > 56.0f && Charger_Vmax < 85.5f)
+        if (Charger_Vmax >= 40.0f && Charger_Vmax <= 90.0f)
         {
             batteryConnected = true;
             gunPhysicallyConnected = true;
@@ -123,7 +123,7 @@ static void decode_0681827E(const twai_message_t &msg)
             memcpy(lastBattData, msg.data, dlc > 8 ? 8 : dlc);
             chargerVolt = parseBEUint32(&msg.data[4]) / 1024.0f;
 
-            if (chargerVolt > 56.0f && chargerVolt < 84.5f)
+            if (chargerVolt >= 40.0f && chargerVolt <= 90.0f)
             {
                 batteryConnected = true;
                 gunPhysicallyConnected = true;
@@ -181,7 +181,7 @@ static void decode_00433F01(const twai_message_t &msg)
         lastTerminalPower = millis();
 
         // HYBRID PLUG DETECTION - Method 1: Voltage + Current presence
-        if (terminalVolt > 56.0f && terminalVolt < 85.5f)
+        if (terminalVolt >= 40.0f && terminalVolt <= 90.0f)
         {
             batteryConnected = true;
             gunPhysicallyConnected = true;

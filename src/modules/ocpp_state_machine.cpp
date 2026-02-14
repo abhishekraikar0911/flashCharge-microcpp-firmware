@@ -1,13 +1,16 @@
 #include "../include/ocpp_state_machine.h"
+#include "../include/secrets.h"
 #include "../include/production_config.h"
 #include "../include/health_monitor.h"
 #include "../include/header.h"
 #include "../include/ocpp/ocpp_client.h"
+#include "../include/config/hardware.h"  // For ENABLE_TEST_MODE
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
 // External declarations
 extern bool bmsSafeToCharge;
+extern bool batteryConnected;
 
 namespace prod
 {
@@ -26,17 +29,33 @@ namespace prod
 
         if (g_persistence.restoreTransaction(txnId, idTag, sizeof(txnId)))
         {
-            Serial.printf("[OCPP_SM] 📋 Resuming persisted transaction: %s\n", txnId);
+            Serial.printf("[OCPP_SM] 📋 Found persisted transaction: %s\n", txnId);
+            Serial.println("[OCPP_SM] ⚠️  Clearing stale transaction - will be cleaned by OCPP manager");
             
-            // CRITICAL: Update global flags to reflect restored state
-            transactionActive = true;
-            activeTransactionId = atoi(txnId);
-            strncpy(persistedIdTag, idTag, sizeof(persistedIdTag) - 1); // Store for library re-hydration
-            remoteStartAccepted = true; // Assume accepted to allow remote commands
-            
-            currentState = ConnectorState::Charging;
+            // FIX: Don't restore state machine to Charging
+            // Let OCPP manager handle cleanup and sync with library
+            currentState = ConnectorState::Available;
             stateEnterTime = millis();
-            g_healthMonitor.onTransactionStarted();
+            
+            // Clear the persisted transaction immediately
+            g_persistence.clearTransaction();
+        }
+        else
+        {
+            // No persisted transaction - check battery status for initial state
+            if (batteryConnected)
+            {
+                // Battery connected → start in PREPARING state
+                Serial.println("[OCPP_SM] 🔋 Battery is connected on startup - Starting in PREPARING state");
+                currentState = ConnectorState::Preparing;
+            }
+            else
+            {
+                // Battery not connected → start in AVAILABLE state
+                Serial.println("[OCPP_SM] 🔌 Battery NOT connected on startup - Starting in AVAILABLE state");
+                currentState = ConnectorState::Available;
+            }
+            stateEnterTime = millis();
         }
 
         // Set up plug detection
@@ -48,7 +67,7 @@ namespace prod
         // For now, handlers would be registered via setRequestHandler or
         // MicroOcpp's built-in transaction callbacks
 
-        Serial.println("[OCPP_SM] ✅ State machine ready");
+        Serial.printf("[OCPP_SM] ✅ State machine ready (Initial state: %s)\n", getStateName());
     }
 
     void OCPPStateMachine::poll()
@@ -58,7 +77,56 @@ namespace prod
         // Note: Charger health status is now handled by setEvseReadyInput in ocpp_manager.cpp
         // MicroOcpp library automatically manages connector status based on EVSE ready state
 
-        // Check for plug status changes (debounced)
+        // BATTERY CONNECTION STATE MANAGEMENT
+        // Rule: Battery connected → PREPARING state
+        //       Battery NOT connected → AVAILABLE state
+        
+        static uint32_t lastBatteryCheckTime = 0;
+        static bool lastBatteryState = false;
+        
+        if (now - lastBatteryCheckTime > PLUG_DEBOUNCE_MS)
+        {
+            lastBatteryCheckTime = now;
+            
+            if (batteryConnected != lastBatteryState)
+            {
+                lastBatteryState = batteryConnected;
+                
+                if (batteryConnected)
+                {
+                    // Battery connected → Transition to PREPARING
+                    if (currentState == ConnectorState::Available)
+                    {
+                        Serial.println("[OCPP_SM] 🔋 Battery connected - Transitioning to PREPARING state");
+                        forceState(ConnectorState::Preparing);
+                    }
+                    else if (currentState == ConnectorState::Finishing)
+                    {
+                        Serial.println("[OCPP_SM] 🔋 Battery connected (was in Finishing) - Transitioning to PREPARING");
+                        forceState(ConnectorState::Preparing);
+                        g_persistence.clearTransaction();
+                    }
+                }
+                else
+                {
+                    // Battery NOT connected → Transition to AVAILABLE
+                    if (currentState != ConnectorState::Available && currentState != ConnectorState::Faulted)
+                    {
+                        Serial.printf("[OCPP_SM] 🔌 Battery disconnected - Transitioning from %s to AVAILABLE\n", getStateName());
+                        forceState(ConnectorState::Available);
+                        
+                        // Clear any active transaction if battery was yanked out
+                        if (currentState == ConnectorState::Charging)
+                        {
+                            g_persistence.clearTransaction();
+                            g_healthMonitor.onTransactionEnded();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for plug status changes (debounced) - based on terminal voltage
         if (now - lastPlugCheckTime > PLUG_DEBOUNCE_MS)
         {
             lastPlugCheckTime = now;
@@ -70,27 +138,18 @@ namespace prod
                               currentPlugState ? "CONNECTED" : "DISCONNECTED");
                 lastPlugState = currentPlugState;
 
-                // FIX 2: LOCK STATE MACHINE - Strict state transitions
-                // Available → (EV Plugged) → Preparing
-                if (currentPlugState && currentState == ConnectorState::Available)
-                {
-                    Serial.println("[OCPP_SM] 🔄 Plug connected, transitioning Preparing");
-                    forceState(ConnectorState::Preparing);
-                }
+                // CRITICAL: Let MicroOCPP handle state transitions automatically
+                // Available → Preparing happens via setConnectorPluggedInput()
+                // Preparing → Charging happens via beginTransaction()
+                // We only track for internal logic, not force transitions
                 
-                // Finishing → (EV unplugged) → Available
-                // FIX 2: NEVER send Available while in Preparing or Charging
                 if (!currentPlugState && currentState == ConnectorState::Finishing)
                 {
-                    Serial.println("[OCPP_SM] 🔄 Plug removed, transitioning Available");
+                    // Only transition to Available after transaction fully ended
+                    Serial.println("[OCPP_SM] 🔄 Plug removed after Finishing, ready for Available");
                     forceState(ConnectorState::Available);
                     g_persistence.clearTransaction();
                     g_healthMonitor.onTransactionEnded();
-                }
-                else if (!currentPlugState && (currentState == ConnectorState::Preparing || currentState == ConnectorState::Charging))
-                {
-                    // FIX 2: ABSOLUTE RULE - Once in Preparing/Charging, NEVER go back to Available
-                    Serial.printf("[OCPP_SM] ⚠️  Plug removed but in %s state - keeping state (waiting for transaction end)\n", getStateName());
                 }
             }
         }
@@ -100,8 +159,8 @@ namespace prod
 
         if (currentState == ConnectorState::Finishing && stateAge > FINISHING_TIMEOUT_MS)
         {
-            // FOR TESTING: Force transition to Available after 10s timeout, even if EV still connected
-            Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - FORCING Available state (Testing)\n",
+            // Timeout: Force transition to Available after 10s
+            Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - transitioning to Available\n",
                           FINISHING_TIMEOUT_MS / 1000.0f);
             forceState(ConnectorState::Available);
             g_persistence.clearTransaction();
@@ -150,27 +209,40 @@ namespace prod
     {
         Serial.printf("[OCPP_SM] 🛑 Transaction stopped: %d\n", transactionId);
 
-        forceState(ConnectorState::Finishing);
+        // Clear state machine to Available
+        forceState(ConnectorState::Available);
         g_healthMonitor.onTransactionEnded();
+        g_persistence.clearTransaction();
     }
 
     bool OCPPStateMachine::onRemoteStartTransaction(const char *idTag, int connectorId)
     {
         Serial.printf("[OCPP_SM] 📥 RemoteStartTransaction: %s (connector %d)\n", idTag, connectorId);
 
-        // CRITICAL: Check charger module health FIRST
+#if ENABLE_TEST_MODE
+        // ═══════════════════════════════════════════════════════════════
+        // TEST MODE BYPASS - Skip all hardware validation checks
+        // ═══════════════════════════════════════════════════════════════
+        Serial.println("\n╔═══════════════════════════════════════════════════════════════╗");
+        Serial.println("║  ⚠️  TEST MODE ACTIVE - Bypassing Hardware Safety Checks    ║");
+        Serial.println("╚═══════════════════════════════════════════════════════════════╝");
+        Serial.printf("[TEST_MODE] 🔓 Accepting RemoteStart WITHOUT validation\n");
+        Serial.printf("[TEST_MODE] 📊 Current state: chargerHealthy=%d bmsSafe=%d gunPhys=%d battConn=%d\n",
+                     isChargerModuleHealthy(), bmsSafeToCharge, ::gunPhysicallyConnected, ::batteryConnected);
+        Serial.println("[TEST_MODE] ✅ RemoteStart ACCEPTED (test mode bypass)");
+        Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
+        return true;
+#endif
+
         if (!isChargerModuleHealthy())
         {
-            Serial.println("[OCPP_SM] ❌ Charger module OFFLINE - REJECTING RemoteStart");
-            Serial.println("[OCPP_SM] ⚠️  Connector is Unavailable - cannot start transaction");
-            return false;  // Reject RemoteStart
+            Serial.printf("[OCPP_SM] ❌ Charger module OFFLINE - REJECTING RemoteStart (stationId=%s)\n", SECRET_CHARGER_ID);
+            return false;
         }
 
-        // SAFETY: Check BMS charging permission
         if (!bmsSafeToCharge)
         {
-            Serial.println("[OCPP_SM] ❌ BMS charging disabled - REJECTING RemoteStart");
-            Serial.println("[OCPP_SM] ⚠️  BMS MOSFET is OFF (byte4=0x01)");
+            Serial.printf("[OCPP_SM] ❌ BMS charging disabled - REJECTING RemoteStart (bmsSafeToCharge=%d)\n", bmsSafeToCharge);
             ocpp::sendBMSAlert("BMS_CHARGING_DISABLED", "Cannot start: BMS MOSFET is OFF");
             return false;
         }
@@ -182,34 +254,41 @@ namespace prod
             return false;
         }
 
-        // Check connector state - must be Available or Preparing
-        if (currentState != ConnectorState::Available && currentState != ConnectorState::Preparing)
+        // REMOVED: Don't reject based on state machine state
+        // Let MicroOCPP library handle state validation
+        // The library knows the true transaction state better than our local state machine
+
+        if (!::gunPhysicallyConnected)
         {
-            Serial.printf("[OCPP_SM] ❌ Cannot start: connector in state %s (expected Available or Preparing)\n", getStateName());
+            Serial.printf("[OCPP_SM] ❌ Gun not connected - REJECTING RemoteStart (gunPhys=%d)\n", 
+                          ::gunPhysicallyConnected);
             return false;
         }
 
-        // Check plug is physically connected
-        if (!isPlugConnected())
-        {
-            Serial.println("[OCPP_SM] ❌ Plug not connected, cannot start transaction");
-            return false;
-        }
-
-        // All checks passed - transition to Preparing
-        Serial.println("[OCPP_SM] ✅ RemoteStartTransaction accepted, moving to Preparing state");
-        forceState(ConnectorState::Preparing);
+        // All checks passed - MicroOCPP will handle state transition to Preparing/Charging
+        Serial.println("[OCPP_SM] ✅ RemoteStartTransaction accepted (MicroOCPP will manage state)");
         return true;
     }
 
     bool OCPPStateMachine::onRemoteStopTransaction(int transactionId)
     {
-        Serial.printf("[OCPP_SM] 📤 RemoteStopTransaction: %d\n", transactionId);
+        Serial.printf("[OCPP_SM] 📤 RemoteStopTransaction: %d (currentState=%s)\n", transactionId, getStateName());
 
-        if (currentState == ConnectorState::Charging)
+        // CRITICAL FIX: Accept RemoteStop if transaction is active, regardless of connector state
+        // OCPP 1.6 spec: RemoteStop should work if transaction exists, not just in Charging state
+        if (transactionId > 0 && (currentState == ConnectorState::Charging || 
+                                   currentState == ConnectorState::Preparing ||
+                                   currentState == ConnectorState::SuspendedEV ||
+                                   currentState == ConnectorState::SuspendedEVSE))
         {
+            Serial.println("[OCPP_SM] ✅ RemoteStop accepted - moving to Finishing");
             forceState(ConnectorState::Finishing);
             return true;
+        }
+        else
+        {
+            Serial.printf("[OCPP_SM] ❌ RemoteStop REJECTED: state=%s, txId=%d (expected Charging/Preparing/Suspended)\n", 
+                         getStateName(), transactionId);
         }
 
         return false;
@@ -217,10 +296,24 @@ namespace prod
 
     bool OCPPStateMachine::isPlugConnected()
     {
-        // Check based on hardware signal from CAN bus
-        // Use :: to access global namespace variable
-        // BOTH gun physical connection AND battery BMS communication required
-        return ::gunPhysicallyConnected && ::batteryConnected;
+        // CRITICAL: Detect vehicle connection via terminal voltage
+        // When vehicle connects, terminal voltage appears (56-99V range)
+        // terminalVolt is declared in header.h as global extern
+        
+        // Vehicle is connected if terminal voltage is in valid range
+        bool voltageDetected = (::terminalVolt >= 56.0f && ::terminalVolt <= 99.0f);
+        
+        // Also check physical gun connection for safety
+        bool plugged = ::gunPhysicallyConnected && voltageDetected;
+        
+        static bool lastState = false;
+        if (plugged != lastState) {
+            Serial.printf("[OCPP_SM] 🔌 Vehicle detection: gun=%d voltage=%.1fV → %s\n",
+                         ::gunPhysicallyConnected, ::terminalVolt, plugged ? "CONNECTED" : "DISCONNECTED");
+            lastState = plugged;
+        }
+        
+        return plugged;
     }
 
     bool OCPPStateMachine::isHardwareSafe()

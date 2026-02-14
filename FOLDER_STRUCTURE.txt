@@ -1,0 +1,493 @@
+================================================================================
+MICROOCPP PROJECT - PROFESSIONAL FOLDER STRUCTURE
+Rivot Motors OCPP Charging Station Firmware
+================================================================================
+
+microocpp/
+│
+├── 📄 ROOT CONFIGURATION FILES
+│   ├── platformio.ini              ★ PlatformIO build configuration
+│   ├── 27dec.code-workspace        ★ VS Code workspace settings
+│   ├── .gitignore                  ★ Git exclusions
+│   ├── .editorconfig               ★ Editor formatting rules
+│   ├── build_clean.bat             ★ Clean build script
+│   ├── README.md                   ★ Project overview
+│   ├── FOLDER_STRUCTURE.txt        ★ This file - folder guide
+│   └── QUICK_REFERENCE.md          ★ Quick command reference
+│
+├── 📚 DOCUMENTATION (docs/)
+│   ├── CHANGELOG.md                    Version history & releases
+│   ├── DOCUMENTATION.md                Technical documentation
+│   ├── HARDWARE_SETUP.md               Hardware configuration guide
+│   ├── METERVALUES_CONFIG.md           Meter values configuration
+│   ├── OCPP_IMPROVEMENTS.md            OCPP protocol improvements
+│   ├── VEHICLE_INFO_DATATRANSFER.md    Vehicle info handling
+│   ├── DEBUG_MENU.md                   Debug menu reference
+│   ├── DEBUG_MONITOR_GUIDE.md          Debugging guide
+│   ├── SERVER_INTEGRATION_GUIDE.md     Server integration
+│   ├── SERVER_REBUILD_GUIDE.md         Rebuild procedures
+│   ├── STATE_TRANSITION_DEBUG.md       State machine debugging
+│   ├── REMOTESTART_STATE_DEBUG.md      Remote start debugging
+│   ├── RESOURCE_MANAGEMENT_FIXES.md    Resource management
+│   ├── TRANSACTION_FIX.md              Transaction fixes
+│   ├── TRANSACTION_GATE_FIXES.md       Transaction gate fixes
+│   ├── ROOT_CAUSE_ANALYSIS_FINAL.md    Root cause analysis
+│   ├── TEST_AND_DEPLOY_CHECKLIST.md    Testing checklist
+│   ├── PRODUCTION_READINESS_CHECKLIST.md Production checklist
+│   ├── DEPLOYMENT_CHECKLIST.md         Deployment checklist
+│   ├── VERIFY_DEPLOYMENT.md            Verify deployment
+│   ├── TEST_RESULTS.md                 Test results log
+│   └── (additional guides)
+│
+├── 🔐 SECURITY & KEYS (keys/)
+│   ├── ca_cert.pem                 Certificate Authority
+│   ├── client_cert.pem             Client certificate
+│   ├── client_key.pem              Client private key
+│   └── (all files git-ignored)
+│
+├── 📁 SOURCE CODE FILES (src/)
+│   │
+│   ├── main.cpp                    ★★ APPLICATION ENTRY POINT & MAIN LOOP
+│   │                                  - System initialization
+│   │                                  - Task creation (OCPP, CAN, Charger)
+│   │                                  - Main loop with health monitoring
+│   │                                  - WiFi & OCPP setup
+│   │
+│   ├── ✅ core/                    SYSTEM CORE FUNCTIONALITY
+│   │   ├── globals.cpp             Global variables & state
+│   │   └── system.cpp              System initialization & setup
+│   │
+│   ├── ✅ config/                  APPLICATION CONFIGURATION
+│   │   └── config.cpp              Runtime configuration management
+│   │
+│   ├── ✅ drivers/                 HARDWARE DRIVERS & INTERFACES
+│   │   ├── can_driver.cpp          ★ CAN abstraction layer (multiplexer)
+│   │   ├── can_mcp2515_driver.cpp  ★ External MCP2515 CAN controller
+│   │   ├── can_twai_driver.cpp     ★ ESP32 internal TWAI (CAN 2.0)
+│   │   ├── can_utils.cpp           CAN utilities & helpers
+│   │   ├── bms_interface.cpp       BMS (Battery Management System) comms
+│   │   ├── charger_interface.cpp   ★ Charger control & communication
+│   │   └── ota_interface.cpp       OTA firmware interface
+│   │
+│   ├── ✅ modules/                 FEATURE MODULES & SERVICES
+│   │   ├── ocpp_manager.cpp        ★★ MAIN OCPP PROTOCOL MANAGER
+│   │   │                              - Transaction management
+│   │   │                              - OCPP state synchronization
+│   │   │                              - RemoteStart/RemoteStop
+│   │   │                              - Meter values reporting
+│   │   │
+│   │   ├── ocpp_state_machine.cpp  ★★ CONNECTOR STATE MACHINE
+│   │   │                              - Available/Preparing/Charging/etc
+│   │   │                              - State transitions
+│   │   │                              - Transaction lifecycle
+│   │   │
+│   │   ├── health_monitor.cpp      System health & watchdog
+│   │   │                           - Watchdog timer
+│   │   │                           - Task health tracking
+│   │   │                           - Reboot management
+│   │   │
+│   │   ├── ota_manager.cpp         OTA firmware updates
+│   │   │                           - Firmware download
+│   │   │                           - Update verification
+│   │   │                           - Rollback handling
+│   │   │
+│   │   ├── production_config.cpp   NVS persistence layer
+│   │   │                           - Transaction persistence
+│   │   │                           - Configuration storage
+│   │   │                           - System health recording
+│   │   │
+│   │   ├── security_manager.cpp    SSL/TLS & authentication
+│   │   │                           - Certificate management
+│   │   │                           - Secure connections
+│   │   │                           - Security policies
+│   │   │
+│   │   ├── wifi_manager.cpp        WiFi connectivity
+│   │   │                           - WiFi connection
+│   │   │                           - Network configuration
+│   │   │                           - Connection recovery
+│   │   │
+│   │   ├── debug_console.cpp       Debug console interface
+│   │   ├── debug_monitor.cpp       Debug monitoring system
+│   │   └── ui_console.cpp          User interface console
+│   │
+│   ├── ⚙️ utils/                   UTILITY FUNCTIONS
+│   │   ├── (future utility files)
+│   │   └── logger_utils.cpp        Logging utilities
+│   │
+│   └── 🌐 Amazon/                  AWS CLOUD INTEGRATION
+│       └── (AWS-specific modules)
+│
+├── 📁 HEADER FILES (include/)
+│   │
+│   ├── header.h                    ★ Common includes & macros
+│   ├── diagnostics.h               System diagnostics
+│   ├── debug_logger.h              Logging system
+│   ├── debug_commands.h            Debug command definitions
+│   ├── debug_config.h              Debug configuration
+│   ├── debug_monitor.h             Debug monitor interface
+│   ├── health_monitor.h            Health monitoring interface
+│   ├── production_config.h         ★ Persistence layer header
+│   ├── secrets.h                   Credentials (GIT IGNORED!)
+│   ├── secrets.h.example           Secrets template (CHECK IN)
+│   │
+│   ├── ✅ core/                    CORE SYSTEM HEADERS
+│   │   ├── types.h                 Custom type definitions
+│   │   └── constants.h             System constants
+│   │
+│   ├── ✅ config/                  CONFIGURATION HEADERS
+│   │   ├── hardware.h              ★ Hardware pin definitions
+│   │   ├── security.h              Security configurations
+│   │   ├── timing.h                ★ Timing constants & intervals
+│   │   └── version.h               ★ Firmware version info
+│   │
+│   ├── ✅ drivers/                 DRIVER HEADERS
+│   │   ├── can_driver.h            ★ CAN abstraction interface
+│   │   ├── can_mcp2515_driver.h    MCP2515 interface
+│   │   ├── can_twai_driver.h       TWAI CAN interface
+│   │   ├── can_utils.h             CAN utilities
+│   │   ├── bms_interface.h         BMS interface
+│   │   ├── charger_interface.h     ★ Charger interface
+│   │   └── ota_interface.h         OTA interface
+│   │
+│   ├── ✅ modules/                 MODULE HEADERS
+│   │   ├── ota_manager.h           OTA manager interface
+│   │   └── ui_console.h            UI console interface
+│   │
+│   ├── ✅ network/                 NETWORK HEADERS
+│   │   ├── wifi_manager.h          WiFi manager interface
+│   │   └── ocpp_client.h           OCPP client interface
+│   │
+│   ├── ✅ security/                SECURITY HEADERS
+│   │   ├── security_manager.h      ★ Security manager interface
+│   │   └── credentials.h           Credential definitions
+│   │
+│   ├── ⚙️ utils/                   UTILITY HEADERS
+│   │   ├── logger_utils.h          Logging utilities
+│   │   └── helpers.h               Common helpers
+│   │
+│   ├── ✅ ocpp/                    OCPP PROTOCOL HEADERS
+│   │   ├── ocpp_client.h           OCPP client API
+│   │   ├── ocpp_state_machine.h    ★ State machine interface
+│   │   ├── operations/             OCPP operations
+│   │   │   ├── start_transaction.h
+│   │   │   ├── stop_transaction.h
+│   │   │   ├── remote_start.h
+│   │   │   └── remote_stop.h
+│   │   └── state/                  State definitions
+│   │       ├── connector_state.h
+│   │       └── charge_state.h
+│   │
+│   └── 🌐 integration/             CLOUD INTEGRATIONS
+│       ├── aws_integration.h
+│       └── steve_integration.h
+│
+├── 📚 EXTERNAL LIBRARIES (lib/)
+│   │
+│   ├── README                      Libraries documentation
+│   │
+│   ├── MicroOcpp/                  ★ OCPP 1.6 & 2.0.1 LIBRARY
+│   │   ├── src/                    Source code
+│   │   │   ├── MicroOcpp/
+│   │   │   │   ├── Core/           Core OCPP logic
+│   │   │   │   ├── Model/          Data models
+│   │   │   │   ├── Operations/     OCPP operations
+│   │   │   │   └── Debug.cpp
+│   │   │   └── MicroOcpp.cpp
+│   │   ├── docs/                   Documentation
+│   │   ├── examples/               Example sketches
+│   │   ├── tests/                  Test cases
+│   │   ├── CMakeLists.txt
+│   │   ├── library.json
+│   │   ├── library.properties
+│   │   └── README.md
+│   │
+│   ├── mcp2515/                    ★ MCP2515 CAN CONTROLLER LIBRARY
+│   │   ├── mcp2515.h & .cpp        Main driver
+│   │   ├── can.h                   CAN definitions
+│   │   ├── examples/               Example code
+│   │   ├── library.json
+│   │   ├── library.properties
+│   │   └── README.md
+│   │
+│   └── (other libraries)
+│
+├── 🧪 TESTING (test/)
+│   │
+│   ├── unit/                       UNIT TESTS
+│   │   ├── test_state_machine.cpp     State machine tests
+│   │   ├── test_persistence.cpp       Persistence layer tests
+│   │   ├── test_ocpp_manager.cpp      OCPP manager tests
+│   │   ├── test_can_driver.cpp        CAN driver tests
+│   │   └── test_health_monitor.cpp    Health monitor tests
+│   │
+│   └── integration/                INTEGRATION TESTS
+│       ├── test_full_transaction.cpp  Full transaction flow
+│       ├── test_remote_start.cpp      Remote start scenario
+│       ├── test_charger_interface.cpp Charger integration
+│       └── test_ocpp_workflow.cpp     Complete OCPP workflow
+│
+├── 🛠️ TOOLS & BUILD SCRIPTS (tools/)
+│   │
+│   ├── build/                      BUILD SCRIPTS
+│   │   ├── build.sh                Linux/Mac build
+│   │   ├── build.bat               Windows batch build
+│   │   ├── flash.sh                Flash to device
+│   │   ├── clean.sh                Clean build
+│   │   └── watch.sh                Watch & rebuild
+│   │
+│   └── scripts/                    UTILITY SCRIPTS
+│       ├── ocpp_simulator.js       OCPP server simulator
+│       ├── serve_firmware.py       OTA firmware server
+│       ├── sign_firmware.py        Firmware signing tool
+│       ├── upload_to_steve.py      Upload to STEVE OCPP
+│       ├── upload_to_steve.sh      Shell version
+│       ├── safe_remote_start_stop.sh Remote operation script
+│       └── OTA_GUIDE.md            OTA procedures
+│
+├── 📤 DEPLOYMENT (deployment/)
+│   │
+│   ├── firmware/                   BUILT & RELEASED FIRMWARE
+│   │   ├── v1.0.0/
+│   │   │   ├── charger_esp32_production.bin
+│   │   │   ├── bootloader.bin
+│   │   │   ├── partitions.bin
+│   │   │   └── firmware.elf
+│   │   ├── v1.1.0/
+│   │   └── (version folders)
+│   │
+│   ├── certificates/               PRODUCTION CERTIFICATES
+│   │   ├── ca_certs/
+│   │   ├── client_certs/
+│   │   └── server_configs/
+│   │
+│   ├── configurations/             PRODUCTION CONFIGURATIONS
+│   │   ├── production.conf
+│   │   ├── staging.conf
+│   │   └── test.conf
+│   │
+│   └── changelogs/                 RELEASE NOTES
+│       ├── v1.0.0.md
+│       ├── v1.1.0.md
+│       └── (version notes)
+│
+├── 📊 ASSETS (assets/)
+│   │
+│   ├── diagrams/                   ARCHITECTURE DIAGRAMS
+│   │   ├── system_architecture.png
+│   │   ├── state_machine.png
+│   │   ├── ocpp_flow.png
+│   │   ├── can_network.png
+│   │   └── data_flow.png
+│   │
+│   └── images/                     REFERENCE IMAGES
+│       ├── hardware_setup.jpg
+│       ├── pcb_layout.jpg
+│       ├── connector_pinout.jpg
+│       └── (other images)
+│
+├── ⚙️ IDE CONFIGURATION (.vscode/)
+│   │
+│   ├── settings.json               Editor & formatting settings
+│   ├── extensions.json             Recommended extensions
+│   ├── launch.json                 Debug launch configurations
+│   ├── tasks.json                  Build & run tasks
+│   └── c_cpp_properties.json       C/C++ intellisense config
+│
+├── 📦 BUILD OUTPUT (.pio/)          [GIT IGNORED]
+│   │
+│   ├── build/
+│   │   ├── charger_esp32_production/  Main build artifacts
+│   │   │   ├── src/
+│   │   │   ├── lib/
+│   │   │   ├── *.o files
+│   │   │   └── firmware.bin
+│   │   └── charger_esp32_debug/       Debug build
+│   │
+│   ├── libdeps/                    Downloaded PlatformIO libraries
+│   │   ├── charger_esp32_production/
+│   │   └── charger_esp32_debug/
+│   │
+│   └── envs/                       Environment information
+│
+└── 📑 REFERENCE FOLDER             [For backup/reference only]
+    └── (offline documentation)
+
+================================================================================
+KEY FILE EXPLANATIONS
+================================================================================
+
+★ CRITICAL FILES (Start here):
+  - src/main.cpp          : Application entry & core loop
+  - src/modules/ocpp_manager.cpp : OCPP protocol logic
+  - src/modules/ocpp_state_machine.cpp : State management
+  - include/config/hardware.h : Pin definitions
+  - include/config/timing.h : Timing constants
+  - platformio.ini : Build configuration
+  - include/config/version.h : Version tracking
+
+⚙️ IMPORTANT CONFIGURATIONS:
+  - include/production_config.h : Persistence interface
+  - include/security_manager.h : Security settings
+  - .vscode/settings.json : IDE formatting
+
+🔧 BUILD & DEPLOY:
+  - platformio.ini : PlatformIO configuration
+  - tools/build/build.bat : Build script
+  - tools/scripts/serve_firmware.py : OTA server
+  - deployment/ : Release artifacts
+
+📚 DOCUMENTATION:
+  - docs/* : All technical documentation
+  - This file : Folder structure guide
+  - README.md : Project overview
+
+================================================================================
+DIRECTORY ORGANIZATION PRINCIPLES
+================================================================================
+
+1. SEPARATION OF CONCERNS
+   - Drivers: Hardware abstraction
+   - Modules: Feature implementations
+   - Config: Settings & constants
+   - Utils: Shared utilities
+
+2. NAMESPACE ORGANIZATION
+   - All production code: namespace prod {}
+   - External libraries: Original namespaces
+   - Tests: namespace test {}
+
+3. HEADER/SOURCE PAIRING
+   - include/ mirrors src/ structure
+   - Every .cpp has corresponding .h
+   - Headers in include/XXX/ vs src/XXX/
+
+4. THIRD-PARTY LIBRARIES
+   - lib/ contains all external libraries
+   - lib/MicroOcpp : Main OCPP implementation
+   - lib/mcp2515 : CAN driver library
+
+5. CONFIGURATION HIERARCHY
+   - platformio.ini : Build configuration
+   - include/config/hardware.h : Hardware pins
+   - include/config/timing.h : Timing values
+   - include/secrets.h : Credentials (git ignored)
+
+================================================================================
+QUICK NAVIGATION
+================================================================================
+
+Need to modify...                      Go to...
+═══════════════════════════════════════════════════════════════════════════════
+Hardware pins                          include/config/hardware.h
+Timing/intervals                       include/config/timing.h
+OCPP logic                            src/modules/ocpp_manager.cpp
+State transitions                     src/modules/ocpp_state_machine.cpp
+CAN communication                     src/drivers/can_driver.cpp
+Charger control                       src/drivers/charger_interface.cpp
+WiFi settings                          src/modules/wifi_manager.cpp
+Persistence/NVS                       src/modules/production_config.cpp
+OTA updates                           src/modules/ota_manager.cpp
+Security/SSL                          src/modules/security_manager.cpp
+Build settings                        platformio.ini
+Debug configuration                   .vscode/launch.json
+Build tasks                           .vscode/tasks.json
+
+================================================================================
+TYPICAL WORKFLOW
+================================================================================
+
+1. BUILDING
+   └─> platformio run
+   └─> Output: .pio/build/charger_esp32_production/firmware.bin
+
+2. DEBUGGING
+   └─> PlatformIO: Debug (via VS Code)
+   └─> Or: platformio debug
+
+3. MONITORING
+   └─> platformio device monitor
+   └─> Monitor serial output at 115200 baud
+
+4. DEPLOYING
+   └─> tools/scripts/serve_firmware.py (start OTA server)
+   └─> Charger pulls firmware & updates automatically
+
+5. TESTING
+   └─> test/unit/ : Unit tests
+   └─> test/integration/ : Full system tests
+
+================================================================================
+GIT IGNORED DIRECTORIES (.gitignore)
+================================================================================
+
+.pio/                    Build artifacts (can be regenerated)
+keys/                    SSL certificates (security)
+secrets.h                App secrets (security)
+build_output.txt         Build logs
+*.o, *.a                 Object files
+__pycache__/             Python cache
+
+✓ DO CHECK IN:
+  - All src/ and include/ code
+  - platformio.ini
+  - All docs/
+  - tools/scripts/
+  - .vscode/ configuration
+  - secrets.h.example (template)
+
+✗ DO NOT CHECK IN:
+  - .pio/ directory
+  - keys/ (real certificates)
+  - secrets.h (real credentials)
+  - Build artifacts
+
+================================================================================
+FUTURE EXPANSION
+================================================================================
+
+Adding New Feature:
+  1. Create src/modules/my_feature.cpp
+  2. Create include/my_feature.h
+  3. Add to namespace prod {}
+  4. Include in src/main.cpp
+  5. Add tests in test/unit/test_my_feature.cpp
+
+Adding New Driver:
+  1. Create src/drivers/my_driver.cpp
+  2. Create include/drivers/my_driver.h
+  3. Add abstraction in can_driver.h (if CAN-related)
+  4. Implement in namespace prod {}
+
+Adding New Config:
+  1. Create include/config/my_config.h
+  2. Add constants/macros
+  3. Reference in src/config/config.cpp
+
+================================================================================
+PROJECT STATISTICS
+================================================================================
+
+Language: C++ (C++17)
+Platform: ESP32 (Espressif32 6.12.0)
+Framework: Arduino
+Total Files: 100+
+Source Code (src/): ~15,000+ lines
+Headers (include/): ~5,000+ lines
+Documentation (docs/): 20+ guides
+Tests: unit/ + integration/
+
+================================================================================
+PROJECT METADATA
+================================================================================
+
+Project Name: MicroOCPP Charging Station
+Organization: Rivot Motors
+Firmware Version: v1.x.x (see include/config/version.h)
+Build System: PlatformIO
+Created: January 2025
+Last Updated: February 2026
+Status: Production Ready
+
+================================================================================
+END OF FOLDER STRUCTURE GUIDE
+================================================================================

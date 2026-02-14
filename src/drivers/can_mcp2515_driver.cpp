@@ -333,33 +333,23 @@ void can2_rx_task(void *arg)
 
                 // Check for bus errors and auto-recover
                 static unsigned long lastErrorLog = 0;
-                static unsigned long lastRecovery = 0;
                 uint8_t errorFlags = mcp2515->getErrorFlags();
                 if (errorFlags != 0)
                 {
-                    // Clear RX overflow flags immediately
+                    // Clear RX overflow flags silently (normal under high load)
                     if (errorFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
                     {
                         mcp2515->clearRXnOVRFlags();
-                        driverStatus.error_count++;
+                        mcp2515->clearInterrupts();
                     }
                     
-                    // Only log critical errors once per 10s
-                    if (errorFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_RXEP))
+                    // Only log critical bus errors once per 30s
+                    if (errorFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_RXEP | MCP2515::EFLG_TXEP))
                     {
-                        if (millis() - lastErrorLog > 10000)
+                        if (millis() - lastErrorLog > 30000)
                         {
-                            Serial.printf("[CAN2] 🚨 Bus error: 0x%02X (check BMS power/wiring/termination)\n", errorFlags);
+                            Serial.printf("[CAN2] ⚠️  Bus error: 0x%02X (check BMS wiring/termination)\n", errorFlags);
                             lastErrorLog = millis();
-                        }
-                        
-                        // Attempt recovery only once per 5s
-                        if (millis() - lastRecovery > 5000)
-                        {
-                            mcp2515->clearRXnOVRFlags();
-                            mcp2515->clearInterrupts();
-                            mcp2515->clearTXInterrupts();
-                            lastRecovery = millis();
                         }
                     }
                 }

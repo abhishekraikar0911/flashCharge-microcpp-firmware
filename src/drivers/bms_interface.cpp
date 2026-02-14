@@ -15,6 +15,10 @@ float totalDischargingAh = 0.0f; // Total discharging Ah (lifetime)
 bool bmsSafeToCharge = false;  // TRUE only when byte4=0x00
 bool bmsHeatingActive = false;  // TRUE when byte5=0x01
 
+// Fault stabilization guard (production safety)
+bool faultLockActive = false;
+unsigned long faultLockTime = 0;
+
 // ====== Build status flags for 0x18FF50E5 ======
 static uint8_t buildStatusFlags()
 {
@@ -59,6 +63,14 @@ void handleBMSMessage(const twai_message_t &msg)
         const uint16_t imax_raw = parseBEUint16(&msg.data[2]);
         BMS_Vmax = vmax_raw / 10.0f;
         BMS_Imax = imax_raw / 10.0f;
+        
+        // Diagnostic: Log raw and calculated values
+        static unsigned long lastBmsLog = 0;
+        if (millis() - lastBmsLog > 5000) {
+            LOG_BMS("BMS: Vmax=%.1fV Imax=%.1fA (raw: 0x%04X=%.1f, 0x%04X=%.1f)",
+                BMS_Vmax, BMS_Imax, vmax_raw, vmax_raw/10.0f, imax_raw, imax_raw/10.0f);
+            lastBmsLog = millis();
+        }
 
         // SAFETY: Parse charging permission flags
         bool newSafeToCharge = (msg.data[4] == 0x00);

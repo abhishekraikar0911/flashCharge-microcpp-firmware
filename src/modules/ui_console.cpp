@@ -198,63 +198,66 @@ void processSerialInput()
         break;
     case 's':
     case 'S':
+        Serial.println("\n🔌 MANUAL START requested");
         if (!ocppInitialized)
         {
-            Serial.println("\n⛔ Cannot start charging: OCPP not initialized.");
+            Serial.println("⛔ Cannot start: OCPP not initialized");
         }
         else if (!batteryConnected)
         {
-            Serial.println("\n⛔ Cannot start charging: No vehicle detected.");
+            Serial.println("⛔ Cannot start: No vehicle detected");
         }
-        else if (!chargingswitch)
+        else if (!bmsSafeToCharge)
         {
-            Serial.println("\n⛔ Charger switch is OFF. Please turn ON the charger switch in the vehicle.");
+            Serial.println("⛔ Cannot start: BMS not ready");
         }
-        else if (ocpp::isTransactionActiveSafe(1))
+        else if (transactionActive || ocpp::isTransactionRunningSafe(1))
         {
-            Serial.println("\n⚠️  Transaction already active.");
+            Serial.println("⚠️  Transaction already active");
         }
         else
         {
-            Serial.println("🔌 Requesting transaction start...");
-            if (ocpp::beginTransactionSafe("MANUAL_UI_START", 1)) {
-                Serial.println("✅ Transaction request sent to server");
-                sessionActive = true;
+            Serial.println("📤 Sending StartTransaction to server...");
+            if (ocpp::beginTransactionSafe("MANUAL_START", 1)) {
+                Serial.println("✅ StartTransaction sent - waiting for server confirmation");
+                Serial.println("   (Charging will start when server responds)");
             } else {
-                Serial.println("❌ Failed to start transaction (check connection)");
+                Serial.println("❌ Failed to send StartTransaction (check OCPP connection)");
             }
         }
         break;
     case 't':
     case 'T':
-        Serial.println("\n🚨 EMERGENCY STOP TRIGGERED!");
+        Serial.println("\n🚨 MANUAL STOP requested");
         
-        // IMMEDIATE hardware disable
-        chargingEnabled = false;
-        
-        if (ocppInitialized && ocpp::isTransactionRunningSafe(1))
+        if (!ocppInitialized)
         {
-            Serial.println("⏹️  Stopping transaction via OCPP...");
-            ocpp::endTransactionSafe(nullptr, "Local");
-            sessionActive = false;
+            Serial.println("⚠️  OCPP not initialized - cannot send StopTransaction");
+            chargingEnabled = false;
+            Serial.println("✅ Hardware disabled locally");
         }
-        else if (ocppInitialized && transactionActive)
+        else if (!transactionActive && !ocpp::isTransactionRunningSafe(1))
         {
-            Serial.println("⏹️  Clearing transaction state...");
-            transactionActive = false;
-            activeTransactionId = -1;
-            remoteStartAccepted = false;
-        }
-        else if (!ocppInitialized)
-        {
-            Serial.println("⚠️  OCPP not initialized - hardware disabled only");
+            Serial.println("ℹ️  No active transaction to stop");
         }
         else
         {
-            Serial.println("ℹ️  No active transaction - hardware already safe");
+            Serial.println("📤 Sending StopTransaction to server...");
+            Serial.printf("   (txId=%d)\n", activeTransactionId);
+            
+            // Disable hardware immediately
+            chargingEnabled = false;
+            sendImmediateChargerStop();
+            Serial.println("✅ Hardware stopped immediately");
+            
+            // Send StopTransaction to server
+            if (ocpp::endTransactionSafe(nullptr, "Local", 1)) {
+                Serial.println("✅ StopTransaction sent to server");
+            } else {
+                Serial.println("⚠️  Failed to send StopTransaction (check OCPP connection)");
+                Serial.println("   (Hardware is stopped, but server may not be notified)");
+            }
         }
-        
-        Serial.println("✅ EMERGENCY STOP COMPLETE - Charger disabled\n");
         break;
     default:
         break;
