@@ -17,6 +17,10 @@ bool batteryConnected = false;
 bool chargingEnabled = false;
 bool chargingswitch = false;
 
+// BMS Safety flags
+bool bmsSafeToCharge = false;  // TRUE only when byte4=0x00
+bool bmsHeatingActive = false;  // TRUE when byte5=0x01
+
 float BMS_Vmax = 0.0f;
 float BMS_Imax = 0.0f;
 float Charger_Vmax = 0.0f;
@@ -30,6 +34,10 @@ float terminalCurr = 0.0f;
 float socPercent = 0.0f;
 float rangeKm = 0.0f;
 uint8_t vehicleModel = 0;  // 0=Unknown, 1=Classic, 2=Pro, 3=Max
+float batteryAh = 0.0f;
+float batterySoc = 0.0f;
+float totalChargingAh = 0.0f;    // Total charging Ah (lifetime)
+float totalDischargingAh = 0.0f; // Total discharging Ah (lifetime)
 
 uint16_t metric79_raw = 0;
 float metric79_scaled = 0.0f;
@@ -45,6 +53,7 @@ unsigned long lastChargerResponse = 0;
 unsigned long lastTerminalPower = 0;
 unsigned long lastTerminalStatus = 0;
 bool chargerModuleOnline = false;     // Charger offline at boot
+bool canRecoveryActive = false;       // CAN bus recovery in progress
 
 const char *chargerStatus = "UNKNOWN";
 const char *terminalchargerStatus = "UNKNOWN";
@@ -58,12 +67,20 @@ bool sessionActive = false;
 bool ocppInitialized = false;
 
 // =========================================================
+// FAULT STABILIZATION GUARD (Production Safety)
+// =========================================================
+bool faultLockActive = false;        // TRUE when fault occurred, blocks new RemoteStart
+unsigned long faultLockTime = 0;     // Timestamp when fault lock was set
+
+// =========================================================
 // TRANSACTION GATE (FIX 1 - HARD GATE)
 // =========================================================
 bool transactionActive = false;      // TRUE only when valid transaction running
 int activeTransactionId = -1;        // Valid transaction ID (>0)
 bool remoteStartAccepted = false;    // TRUE only after RemoteStart accepted
 char persistedIdTag[32] = {0};      // Restored IdTag for library re-hydration
+unsigned long txStartTime = 0;       // Transaction start timestamp (millis)
+unsigned long txStopTime = 0;        // Transaction stop timestamp (millis)
 
 // Buffers
 uint8_t lastData[8] = {0};

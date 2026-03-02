@@ -16,12 +16,8 @@
 #define ID_TERM_STATUS 0x00473F01UL
 #define ID_HEARTBEAT 0x18FF50E5UL
 #define ID_BMS_REQUEST 0x1806E5F4UL
-#define ID_SOC_REQUEST 0x160B0180UL
-#define ID_SOC_RESPONSE 0x160B8001UL
-#define ID_CHARGE_AH_REQUEST 0x160B0180UL
-#define ID_CHARGE_AH_RESPONSE 0x160B8001UL
-#define ID_DISCHARGE_AH_REQUEST 0x160D0180UL
-#define ID_DISCHARGE_AH_RESPONSE 0x160D8001UL
+#define ID_SOC_REQUEST 0x18900140UL
+#define ID_SOC_RESPONSE 0x18904001UL
 
 // =========================================================
 // GLOBAL SYNCHRONIZATION
@@ -95,6 +91,8 @@ extern bool transactionActive;      // TRUE only when valid transaction running
 extern int activeTransactionId;     // Valid transaction ID (>0)
 extern bool remoteStartAccepted;    // TRUE only after RemoteStart accepted
 extern char persistedIdTag[32];     // NEW: Restored IdTag for library re-hydration
+extern unsigned long txStartTime;   // Transaction start timestamp (millis)
+extern unsigned long txStopTime;    // Transaction stop timestamp (millis)
 
 // Transaction state (for safe MeterValues) - UNUSED
 // extern bool transactionActive;
@@ -143,6 +141,7 @@ extern Group groups[];
 // CHARGER HEALTH MONITORING
 // =========================================================
 extern bool chargerModuleOnline;  // NEW: Charger module communication status
+extern bool canRecoveryActive;     // NEW: CAN bus recovery in progress (disables voltage-drop disconnect)
 bool isChargerModuleHealthy();     // NEW: Check if charger is responding
 void notifyChargerFault(bool faulted); // NEW: Notify OCPP about charger fault
 void initGlobals();
@@ -153,10 +152,6 @@ void handleBMSMessage(const twai_message_t &msg);
 void handleChargerMessage(const twai_message_t &msg);
 void requestSOCFromBMS();
 void handleSOCMessage(const twai_message_t &msg);
-void requestChargingAh();        // NEW: Request total charging Ah
-void requestDischargingAh();     // NEW: Request total discharging Ah
-void handleChargingAhMessage(const twai_message_t &msg);    // NEW
-void handleDischargingAhMessage(const twai_message_t &msg); // NEW
 
 bool popFrame(RxBufItem &out);
 void pushFrame(const twai_message_t &msg);

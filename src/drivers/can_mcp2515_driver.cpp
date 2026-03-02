@@ -85,8 +85,8 @@ namespace CAN_MCP2515
                 return false;
             }
 
-            // RXB0: Filter 1 = 0x160B8001 (ChargingAh response)
-            result = mcp2515->setFilter(MCP2515::RXF1, true, 0x160B8001UL);
+            // RXB0: Filter 1 = 0x18904001 (SOC response)
+            result = mcp2515->setFilter(MCP2515::RXF1, true, 0x18904001UL);
             if (result != MCP2515::ERROR_OK)
             {
                 Serial.printf("[CAN2] ❌ Filter1 failed: %d\n", result);
@@ -94,8 +94,8 @@ namespace CAN_MCP2515
                 return false;
             }
 
-            // RXB1: Filter 2 = 0x160D8001 (DischargingAh response)
-            result = mcp2515->setFilter(MCP2515::RXF2, true, 0x160D8001UL);
+            // RXB1: Filter 2 = 0x18904001 (SOC response - duplicate for redundancy)
+            result = mcp2515->setFilter(MCP2515::RXF2, true, 0x18904001UL);
             if (result != MCP2515::ERROR_OK)
             {
                 Serial.printf("[CAN2] ❌ Filter2 failed: %d\n", result);
@@ -120,7 +120,7 @@ namespace CAN_MCP2515
                 return false;
             }
 
-            Serial.println("[CAN2] ✅ Hardware filters: ONLY 3 BMS IDs (0x1806E5F4, 0x160B8001, 0x160D8001)");
+            Serial.println("[CAN2] ✅ Hardware filters: ONLY 2 BMS IDs (0x1806E5F4, 0x18904001)");
 
             // Set normal mode
             result = mcp2515->setNormalMode();

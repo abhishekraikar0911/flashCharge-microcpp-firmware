@@ -5,20 +5,6 @@
 #include <math.h>
 #include "drivers/can_utils.h"
 
-// SOC related
-float batteryAh = 0.0f;
-float batterySoc = 0.0f; // 0–100 %
-float totalChargingAh = 0.0f;    // Total charging Ah (lifetime)
-float totalDischargingAh = 0.0f; // Total discharging Ah (lifetime)
-
-// BMS Safety flags
-bool bmsSafeToCharge = false;  // TRUE only when byte4=0x00
-bool bmsHeatingActive = false;  // TRUE when byte5=0x01
-
-// Fault stabilization guard (production safety)
-bool faultLockActive = false;
-unsigned long faultLockTime = 0;
-
 // ====== Build status flags for 0x18FF50E5 ======
 static uint8_t buildStatusFlags()
 {
@@ -103,27 +89,6 @@ void handleBMSMessage(const twai_message_t &msg)
         {
             batteryConnected = true;
             lastBMS = millis();
-            
-            // Voltage-based SOC (56V=0%, 84V=100%) - fallback when Ah not available
-            socPercent = ((BMS_Vmax - 56.0f) / (84.0f - 56.0f)) * 100.0f;
-            if (socPercent < 0.0f) socPercent = 0.0f;
-            if (socPercent > 100.0f) socPercent = 100.0f;
-            
-            // Model detection
-            float maxCapacityAh;
-            if (BMS_Imax > 60.0f) {
-                maxCapacityAh = 90.0f;
-                vehicleModel = 3;
-            } else if (BMS_Imax > 30.0f) {
-                maxCapacityAh = 60.0f;
-                vehicleModel = 2;
-            } else {
-                maxCapacityAh = 30.0f;
-                vehicleModel = 1;
-            }
-            
-            batteryAh = (socPercent / 100.0f) * maxCapacityAh;
-            rangeKm = batteryAh * 2.7f;
         }
         xSemaphoreGive(dataMutex);
     }
@@ -168,118 +133,56 @@ void requestSOCFromBMS()
 {
     if (!CAN_MCP2515::isActive()) return;
     uint8_t txData[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    LOG_BMS("[CAN2-TX] 0x18900140: 00 00 00 00 00 00 00 00");
     CAN_MCP2515::sendMessage(ID_SOC_REQUEST & 0x1FFFFFFFUL, txData, 8, true);
-}
-
-void requestChargingAh()
-{
-    if (!CAN_MCP2515::isActive()) return;
-    uint8_t txData[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    LOG_BMS("[CAN2-TX] 0x160B0180: 00 00 00 00 00 00 00 00");
-    CAN_MCP2515::sendMessage(ID_CHARGE_AH_REQUEST & 0x1FFFFFFFUL, txData, 8, true);
-}
-
-void requestDischargingAh()
-{
-    if (!CAN_MCP2515::isActive()) return;
-    uint8_t txData[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    LOG_BMS("[CAN2-TX] 0x160D0180: 00 00 00 00 00 00 00 00");
-    CAN_MCP2515::sendMessage(ID_DISCHARGE_AH_REQUEST & 0x1FFFFFFFUL, txData, 8, true);
-}
-
-void handleChargingAhMessage(const twai_message_t &msg)
-{
-    if (!msg.extd)
-        return;
-
-    if ((msg.identifier & 0x1FFFFFFFUL) != (ID_CHARGE_AH_RESPONSE & 0x1FFFFFFFUL))
-        return;
-
-    if (msg.data_length_code < 4)
-        return;
-
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-    {
-        using namespace can_utils;
-        uint32_t charge_ah_raw = parseBEUint32(&msg.data[0]);
-        totalChargingAh = charge_ah_raw * 0.001f;
-        
-        LOG_BMS("[CAN2-RX] 0x160B8001: %02X %02X %02X %02X %02X %02X %02X %02X -> ChargingAh=%.3fAh",
-                msg.data[0], msg.data[1], msg.data[2], msg.data[3],
-                msg.data[4], msg.data[5], msg.data[6], msg.data[7],
-                totalChargingAh);
-        
-        // Calculate SOC if ChargingAh > 0 (DischargingAh can be 0 for new battery)
-        if (totalChargingAh > 0.0f)
-        {
-            batteryAh = totalChargingAh - totalDischargingAh;
-            
-            // Detect model using BMS_Imax
-            float maxCapacityAh;
-            if (BMS_Imax > 60.0f) {
-                maxCapacityAh = 90.0f;
-                vehicleModel = 3;
-            } else if (BMS_Imax > 30.0f) {
-                maxCapacityAh = 60.0f;
-                vehicleModel = 2;
-            } else {
-                maxCapacityAh = 30.0f;
-                vehicleModel = 1;
-            }
-            
-            // Clamp to valid range
-            if (batteryAh < 0.0f) batteryAh = 0.0f;
-            if (batteryAh > maxCapacityAh) batteryAh = maxCapacityAh;
-            
-            // Calculate SOC and Range
-            batterySoc = (batteryAh / maxCapacityAh) * 100.0f;
-            if (batterySoc < 0.0f) batterySoc = 0.0f;
-            if (batterySoc > 100.0f) batterySoc = 100.0f;
-            
-            socPercent = batterySoc;
-            rangeKm = batteryAh * 2.7f;
-            
-            LOG_BMS("✅ SOC calculated: %.1f%% (%.1fAh / %.0fAh) Range=%.1fkm Model=%d",
-                socPercent, batteryAh, maxCapacityAh, rangeKm, vehicleModel);
-            
-            if (socPercent > 0.0f) {
-                batteryConnected = true;
-            }
-        }
-
-        xSemaphoreGive(dataMutex);
-    }
-}
-
-void handleDischargingAhMessage(const twai_message_t &msg)
-{
-    if (!msg.extd)
-        return;
-
-    if ((msg.identifier & 0x1FFFFFFFUL) != (ID_DISCHARGE_AH_RESPONSE & 0x1FFFFFFFUL))
-        return;
-
-    if (msg.data_length_code < 4)
-        return;
-
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-    {
-        using namespace can_utils;
-        uint32_t discharge_ah_raw = parseBEUint32(&msg.data[0]);
-        totalDischargingAh = discharge_ah_raw * 0.001f;
-        
-        LOG_BMS("[CAN2-RX] 0x160D8001: %02X %02X %02X %02X %02X %02X %02X %02X -> DischargingAh=%.3fAh",
-                msg.data[0], msg.data[1], msg.data[2], msg.data[3],
-                msg.data[4], msg.data[5], msg.data[6], msg.data[7],
-                totalDischargingAh);
-
-        xSemaphoreGive(dataMutex);
-    }
 }
 
 void handleSOCMessage(const twai_message_t &msg)
 {
-    // Deprecated - SOC now calculated from Ah values
-    (void)msg;
-    return;
+    if (!msg.extd)
+        return;
+
+    if ((msg.identifier & 0x1FFFFFFFUL) != (ID_SOC_RESPONSE & 0x1FFFFFFFUL))
+        return;
+
+    if (msg.data_length_code < 8)
+        return;
+
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+        // Last 2 bytes (bytes 6-7) contain SOC as big-endian uint16
+        uint16_t soc_raw = (msg.data[6] << 8) | msg.data[7];
+        socPercent = soc_raw / 10.0f;  // Divide by 10 to get percentage
+        
+        // Clamp to valid range
+        if (socPercent < 0.0f) socPercent = 0.0f;
+        if (socPercent > 100.0f) socPercent = 100.0f;
+        
+        LOG_BMS("[CAN2-RX] 0x18904001: %02X %02X %02X %02X %02X %02X %02X %02X -> SOC=%.1f%%",
+                msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                msg.data[4], msg.data[5], msg.data[6], msg.data[7],
+                socPercent);
+        
+        // Update battery Ah and range based on SOC
+        float maxCapacityAh;
+        if (BMS_Imax > 60.0f) {
+            maxCapacityAh = 90.0f;
+            vehicleModel = 3;
+        } else if (BMS_Imax > 30.0f) {
+            maxCapacityAh = 60.0f;
+            vehicleModel = 2;
+        } else {
+            maxCapacityAh = 30.0f;
+            vehicleModel = 1;
+        }
+        
+        batteryAh = (socPercent / 100.0f) * maxCapacityAh;
+        rangeKm = batteryAh * 2.7f;
+        
+        if (socPercent > 0.0f) {
+            batteryConnected = true;
+        }
+
+        xSemaphoreGive(dataMutex);
+    }
 }

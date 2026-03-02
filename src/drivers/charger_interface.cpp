@@ -2,6 +2,9 @@
 #include "drivers/can_twai_driver.h"
 #include "drivers/can_mcp2515_driver.h"
 #include "health_monitor.h"
+#include "debug_logger.h"
+#include "utils/log_macros.h"
+#include "utils/can_status_logger.h"
 #include <Arduino.h>
 #include <string.h>
 #include "drivers/can_utils.h"
@@ -71,6 +74,14 @@ static void decode_0681817E(const twai_message_t &msg)
         return;
     const uint8_t func = msg.data[1];
     const uint32_t raw = parseBEUint32(&msg.data[4]);
+    
+    // Debug logging
+    if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+        Serial.printf("[CHARGER] RX: 0x%08lX Func=0x%02X Data: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                     (unsigned long)(msg.identifier & 0x1FFFFFFFUL), func,
+                     msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                     msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+    }
 
     // FIX: Use timeout to prevent deadlock
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
@@ -79,16 +90,25 @@ static void decode_0681817E(const twai_message_t &msg)
         {
             memcpy(lastStatusData, msg.data, dlc > 8 ? 8 : dlc);
             chargerStatus = (msg.data[3] == 0x00) ? "ON" : "OFF";
+            if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+                Serial.printf("[CHARGER]   ← Status: %s\n", chargerStatus);
+            }
         }
         else if (func == 0x00)
         {
             memcpy(lastVmaxData, msg.data, dlc > 8 ? 8 : dlc);
             Charger_Vmax = raw / 1024.0f;
+            if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+                Serial.printf("[CHARGER]   ← Vmax=%.1fV\n", Charger_Vmax);
+            }
         }
         else if (func == 0x03)
         {
             memcpy(lastImaxData, msg.data, dlc > 8 ? 8 : dlc);
             Charger_Imax = raw / 30.5f;
+            if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+                Serial.printf("[CHARGER]   ← Imax=%.1fA\n", Charger_Imax);
+            }
         }
         if (Charger_Vmax >= 40.0f && Charger_Vmax <= 90.0f)
         {
@@ -132,7 +152,7 @@ static void decode_0681827E(const twai_message_t &msg)
         else if (func == 0x82)
         {
             memcpy(lastCurrData, msg.data, dlc > 8 ? 8 : dlc);
-            chargerCurr = parseBEUint16(&msg.data[6]) / 10.0f;
+            chargerCurr = parseBEUint16(&msg.data[6]) / 1024.0f;
         }
         else if (func == 0x80)
         {
@@ -167,6 +187,12 @@ static void decode_00433F01(const twai_message_t &msg)
     const uint8_t dlc = msg.data_length_code;
     if (dlc < 8)
         return;
+    
+    // Debug logging
+    if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+        Serial.printf("[CHARGER] RX: 0x%08lX (Terminal Power)\n",
+                     (unsigned long)(msg.identifier & 0x1FFFFFFFUL));
+    }
 
     // FIX: Use timeout to prevent deadlock
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
@@ -176,6 +202,11 @@ static void decode_00433F01(const twai_message_t &msg)
         terminalVolt = parseBEFloat(&msg.data[0]);
         terminalCurr = parseBEFloat(&msg.data[4]);  // Already scaled correctly
         terminalchargerPower = terminalVolt * terminalCurr;
+        
+        if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+            Serial.printf("[CHARGER]   ← Terminal: V=%.1fV I=%.1fA P=%.1fW\n",
+                         terminalVolt, terminalCurr, terminalchargerPower);
+        }
 
         // CRITICAL: Update timestamp for charger health monitoring
         lastTerminalPower = millis();
@@ -261,58 +292,20 @@ void sendGroupRequest(Group &g)
     tx.data[0] = 0x01;
     tx.data[1] = func;
 
-    static bool lastEnabled = false;
-
     if (func == 0x32)
     {
         bool enabled = false;
-        bool gunConnected = false;
-        bool battConnected = false;
-        
-        // SAFETY: Read all conditions atomically
         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
             enabled = chargingEnabled;
-            gunConnected = gunPhysicallyConnected;
-            battConnected = batteryConnected;
             xSemaphoreGive(dataMutex);
         }
-        else
-        {
-            Serial.println("[SAFETY] ⚠️  Mutex timeout in sendGroupRequest - ABORTING charge command");
-            return; // CRITICAL: Do not send command if mutex fails
-        }
-        
-        // SAFETY: All conditions must be true
-        bool safeToCharge = enabled && gunConnected && battConnected;
-
-        // RACE CONDITION FIX: Only send on state change
-        if (safeToCharge == lastEnabled)
-            return;
-
-        lastEnabled = safeToCharge;
         tx.data[2] = 0x00;
-        tx.data[3] = safeToCharge ? 0x00 : 0x01;
-        
-        Serial.printf("[SAFETY] Charging command: %s (gun=%d batt=%d enabled=%d)\n",
-            safeToCharge ? "START" : "STOP", gunConnected, battConnected, enabled);
+        tx.data[3] = enabled ? 0x00 : 0x01;
     }
     else if (func == 0x00 || func == 0x03)
     {
-        bool enabled = false;
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-        {
-            enabled = chargingEnabled;
-            xSemaphoreGive(dataMutex);
-        }
-        else
-        {
-            return; // SAFETY: Skip if mutex fails
-        }
-        
-        if (!enabled)
-            return;
-
+        // Always broadcast Vmax/Imax from BMS
         uint32_t raw = (func == 0x00) ? cachedRawV : cachedRawI;
         tx.data[4] = (raw >> 24) & 0xFF;
         tx.data[5] = (raw >> 16) & 0xFF;
@@ -321,6 +314,23 @@ void sendGroupRequest(Group &g)
     }
 
     (void)CAN_TWAI::sendMessage(tx.identifier, tx.data, tx.data_length_code, true);
+    
+    // Debug logging
+    if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+        Serial.printf("[CHARGER] TX: 0x%08lX Func=0x%02X Data: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                     (unsigned long)tx.identifier, func,
+                     tx.data[0], tx.data[1], tx.data[2], tx.data[3],
+                     tx.data[4], tx.data[5], tx.data[6], tx.data[7]);
+        
+        if (func == 0x00) {
+            Serial.printf("[CHARGER]   → Vmax=%.1fV (raw=0x%08lX)\n", cachedRawV / 1024.0f, (unsigned long)cachedRawV);
+        } else if (func == 0x03) {
+            Serial.printf("[CHARGER]   → Imax=%.1fA (raw=0x%08lX)\n", cachedRawI / 30.5f, (unsigned long)cachedRawI);
+        } else if (func == 0x32) {
+            Serial.printf("[CHARGER]   → Control: %s\n", tx.data[3] == 0x00 ? "START" : "STOP");
+        }
+    }
+    
     g.funcIndex = (g.funcIndex + 1) % g.funcCount;
 }
 
@@ -329,74 +339,162 @@ void chargerCommTask(void *arg)
 {
     static unsigned long lastFeedback = 0;
     static unsigned long lastSOCRequest = 0;
-    static unsigned long lastGroupRequest = 0;
     static unsigned long lastBusRecovery = 0;
+    static bool startupInitComplete = false;
+
+    // CRITICAL: Send initial messages to both groups at startup
+    // Charger module expects both CAN IDs to initialize properly
+    Serial.println("[CHARGER] Sending startup initialization sequence...");
+    vTaskDelay(pdMS_TO_TICKS(500)); // Wait for CAN bus to stabilize
+    
+    // Send Group 1 (Control) - all 3 functions
+    for (int i = 0; i < 3; i++) {
+        sendGroupRequest(groups[0]);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    // Send Group 2 (Telemetry) - all 5 functions
+    for (int i = 0; i < 5; i++) {
+        sendGroupRequest(groups[1]);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    Serial.println("[CHARGER] ✅ Startup initialization complete");
+    startupInitComplete = true;
 
     while (true)
     {
         // SAFETY: CAN bus error recovery
         twai_status_info_t s;
-        if (twai_get_status_info(&s) == ESP_OK)
+        memset(&s, 0, sizeof(s));
+        esp_err_t status_result = twai_get_status_info(&s);
+        
+        // Print status every 10 seconds
+        static unsigned long lastStatusPrint = 0;
+        if (millis() - lastStatusPrint > 10000) {
+            if (status_result == ESP_OK) {
+                CANStatusLogger::printStatusReport(s);
+            } else {
+                LOG_ERROR_F(CAN, "Failed to get status: %d", status_result);
+            }
+            lastStatusPrint = millis();
+        }
+        
+        if (status_result == ESP_OK)
         {
             // CRITICAL: Immediate recovery on bus-off
             if (s.state == TWAI_STATE_BUS_OFF || s.state == TWAI_STATE_STOPPED)
             {
+                // Print diagnostic every 10 seconds
+                static unsigned long lastDiagnosticPrint = 0;
+                if (millis() - lastDiagnosticPrint > 10000) {
+                    CANStatusLogger::printDiagnostics(s);
+                    lastDiagnosticPrint = millis();
+                }
+                
                 if (millis() - lastBusRecovery > 5000) // Prevent rapid recovery loops
                 {
-                    Serial.println("[CAN] 🚨 BUS-OFF detected, initiating recovery...");
+                    LOG_SECTION_START("CAN BUS RECOVERY");
+                    LOG_CRITICAL(CAN, "Bus-off detected, initiating recovery");
                     
-                    // CRITICAL: Stop driver completely before reinstalling
-                    if (!CAN_TWAI::deinit())
-                    {
-                        Serial.println("[CAN1] Deinit failed");
+                    // Set global recovery flag to disable voltage-drop disconnect
+                    canRecoveryActive = true;
+                    
+                    CANStatusLogger::printRecoveryStep(1, 4, "Deinitializing TWAI driver");
+                    if (!CAN_TWAI::deinit()) {
+                        LOG_ERROR(CAN, "Deinit failed");
                     }
-                    vTaskDelay(pdMS_TO_TICKS(100));
+                    vTaskDelay(pdMS_TO_TICKS(200));
                     
-                    // Reinitialize
-                    if (!CAN_TWAI::init())
-                    {
-                        Serial.println("[CAN1] Reinit failed");
+                    CANStatusLogger::printRecoveryStep(2, 4, "Reinitializing TWAI driver");
+                    if (!CAN_TWAI::init()) {
+                        LOG_ERROR(CAN, "Reinit failed - HARDWARE PROBLEM!");
+                        Serial.println("\n  Action required:");
+                        Serial.println("    • Check charger module power (LED ON?)");
+                        Serial.println("    • Verify 120Ω termination at BOTH ends");
+                        Serial.println("    • Check CANH/CANL wiring");
+                        Serial.println("    • Verify common ground connection");
                     }
                     lastBusRecovery = millis();
                     
-                    // SAFETY: Disable charging during CAN recovery
-                    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-                    {
+                    CANStatusLogger::printRecoveryStep(3, 4, "Disabling charging for safety");
+                    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                         chargingEnabled = false;
                         xSemaphoreGive(dataMutex);
                     }
+                    
+                    CANStatusLogger::printRecoveryStep(4, 4, "Marking for re-initialization");
+                    startupInitComplete = false;
+                    CANStatusLogger::printRecoveryComplete(true);
+                    LOG_INFO(CHARGER, "Re-sending initialization sequence");
+                    LOG_SECTION_END();
                 }
             }
-            
-            // [DISABLED] CAN bus status logging - removed for cleaner console
-            // static unsigned long lastBusStatus = 0;
-            // if (millis() - lastBusStatus >= 10000)
-            // {
-            //     if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
-            //     {
-            //         Serial.printf("📊 CAN1: State=%d TX_Err=%d RX_Err=%d TX_Q=%d RX_Q=%d\n",
-            //             s.state, s.tx_error_counter, s.rx_error_counter, s.msgs_to_tx, s.msgs_to_rx);
-            //         
-            //         auto can2Status = CAN_MCP2515::getStatus();
-            //         Serial.printf("📊 CAN2: RX=%u TX=%u Err=%u LastActivity=%lums ago\n",
-            //             can2Status.total_rx_messages, can2Status.total_tx_messages, 
-            //             can2Status.error_count, millis() - can2Status.last_activity_ms);
-            //         
-            //         xSemaphoreGive(serialMutex);
-            //     }
-            //     lastBusStatus = millis();
-            // }
+            else if (canRecoveryActive)
+            {
+                // Clear recovery flag when bus is healthy again
+                canRecoveryActive = false;
+                LOG_SECTION_START("CAN BUS RECOVERY SUCCESSFUL");
+                LOG_INFO_F(CAN, "State: %s", CANStatusLogger::getStateStr(s.state));
+                LOG_DATA("TX Errors", (int)s.tx_error_counter);
+                LOG_DATA("RX Errors", (int)s.rx_error_counter);
+                LOG_INFO(CAN, "Normal operation resumed");
+                LOG_SECTION_END();
+            }
+        }
+        
+        // Re-send startup sequence after CAN recovery
+        if (!startupInitComplete) {
+            for (int i = 0; i < 3; i++) {
+                sendGroupRequest(groups[0]);
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            for (int i = 0; i < 5; i++) {
+                sendGroupRequest(groups[1]);
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            startupInitComplete = true;
         }
 
-        // Send group requests with proper spacing
-        if (millis() - lastGroupRequest >= 500)
+        // FIX: Send control group every loop (like old working code)
+        // This ensures Vmax/Imax updates every ~300ms to prevent charger timeout
+        sendGroupRequest(groups[0]);  // Control group: 0x32, 0x00, 0x03
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
+        // CRITICAL FIX: Always send telemetry group, not just when gun connected
+        // Charger module needs both CAN IDs active to stay healthy
+        sendGroupRequest(groups[1]);  // Telemetry group: 0x84, 0x82, 0x79, 0x80, 0x83
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
+        // [REMOVED] Status-change command - Now handled periodically by sendGroupRequest(groups[0])
+        /*
+        bool currentChargingState = false;
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            sendGroupRequest(groups[0]);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            sendGroupRequest(groups[1]);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            lastGroupRequest = millis();
+            currentChargingState = chargingEnabled && gunPhysicallyConnected && batteryConnected;
+            xSemaphoreGive(dataMutex);
         }
+        
+        if (currentChargingState != lastChargingState)
+        {
+            // Send START/STOP command via function 0x32
+            twai_message_t cmd = {};
+            cmd.identifier = 0x068181FEUL & 0x1FFFFFFFUL;
+            cmd.extd = 1;
+            cmd.data_length_code = 8;
+            memset(cmd.data, 0, 8);
+            cmd.data[0] = 0x01;
+            cmd.data[1] = 0x32;  // Function: charger control
+            cmd.data[2] = 0x00;
+            cmd.data[3] = currentChargingState ? 0x00 : 0x01;  // 0x00=START, 0x01=STOP
+            
+            Serial.printf("[COMMAND] Charging state changed: %s\n", 
+                         currentChargingState ? "START" : "STOP");
+            CAN_TWAI::sendMessage(cmd.identifier, cmd.data, cmd.data_length_code, true);
+            
+            lastChargingState = currentChargingState;
+        }
+        */
 
         // Send charger feedback
         if (millis() - lastFeedback >= 100)
@@ -405,12 +503,10 @@ void chargerCommTask(void *arg)
             lastFeedback = millis();
         }
 
-        // Request Ah data periodically
+        // Request SOC data periodically
         if (millis() - lastSOCRequest >= 2000)
         {
-            requestChargingAh();
-            vTaskDelay(pdMS_TO_TICKS(10));
-            requestDischargingAh();
+            requestSOCFromBMS();
             lastSOCRequest = millis();
         }
 
@@ -443,14 +539,6 @@ void chargerCommTask(void *arg)
             if ((msg.identifier & 0x1FFFFFFFUL) == (ID_BMS_REQUEST & 0x1FFFFFFFUL))
             {
                 handleBMSMessage(msg);
-            }
-            else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_CHARGE_AH_RESPONSE & 0x1FFFFFFFUL))
-            {
-                handleChargingAhMessage(msg);
-            }
-            else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_DISCHARGE_AH_RESPONSE & 0x1FFFFFFFUL))
-            {
-                handleDischargingAhMessage(msg);
             }
             else if ((msg.identifier & 0x1FFFFFFFUL) == (ID_SOC_RESPONSE & 0x1FFFFFFFUL))
             {
@@ -536,7 +624,21 @@ void sendImmediateChargerStop()
 bool isChargerModuleHealthy()
 {
     const unsigned long now = millis();
-    const unsigned long CHARGER_TIMEOUT_MS = 3000; // 3 seconds timeout
+
+    // ═══════════════════════════════════════════════════════════════
+    // STARTUP STABILIZATION (CRITICAL)
+    // ═══════════════════════════════════════════════════════════════
+    // Don't report faults in the first 30 seconds of uptime. 
+    if (now < 30000) {
+        static unsigned long lastGraceLog = 0;
+        if (now - lastGraceLog > 5000) {
+            Serial.printf("[HEALTH] Grace period active (%lu ms remaining) - reporting HEALTHY\n", 30000 - now);
+            lastGraceLog = now;
+        }
+        return true;
+    }
+
+    const unsigned long CHARGER_TIMEOUT_MS = 5000; // 5 seconds timeout
     
     // Check if we're receiving critical CAN messages from charger
     bool terminalPowerOk = (now - lastTerminalPower) < CHARGER_TIMEOUT_MS;
@@ -545,7 +647,26 @@ bool isChargerModuleHealthy()
     
     // Charger is healthy if at least 2 out of 3 messages are recent
     int healthyCount = (terminalPowerOk ? 1 : 0) + (terminalStatusOk ? 1 : 0) + (heartbeatOk ? 1 : 0);
-    bool healthy = (healthyCount >= 2);
+    bool currentReadingHealthy = (healthyCount >= 2);
+
+    // Fault Debouncing (CRITICAL):
+    // Only transition to FAULTED if we haven't seen a healthy state for > 3 seconds.
+    // This prevents momentary CAN BUS-OFF/Recovery cycles from flapping the OCPP status.
+    static unsigned long lastHealthyTime = now;
+    if (currentReadingHealthy) {
+        lastHealthyTime = now;
+    }
+
+    bool healthy = (now - lastHealthyTime < 3000);
+    
+    // Log health status changes
+    static bool lastHealthStatus = true;
+    if (healthy != lastHealthStatus) {
+        Serial.printf("[HEALTH] Status changed: %s (Power:%d Status:%d HB:%d debounce_ms=%lu)\n",
+                     healthy ? "HEALTHY" : "FAULTED",
+                     terminalPowerOk, terminalStatusOk, heartbeatOk, now - lastHealthyTime);
+        lastHealthStatus = healthy;
+    }
     
     // Update global status
     chargerModuleOnline = healthy;

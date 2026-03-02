@@ -52,7 +52,7 @@ namespace ocpp
     /**
      * Send vehicle info via DataTransfer (before transaction starts)
      */
-    void sendVehicleInfo(float soc, float maxCurrent, float voltage, float current, float temperature, uint8_t model, float range);
+    void sendVehicleInfo(float soc, float maxCurrent, float voltage, float current, float temperature, uint8_t model, float range, const char* vin = "ME9NP1411H2172005");
 
     /**
      * Send session summary via DataTransfer (after transaction ends)

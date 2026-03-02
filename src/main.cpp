@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <nvs_flash.h>
+#include <LittleFS.h>
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
@@ -146,6 +147,19 @@ void setup()
         }
     }
 
+    // CRITICAL FIX: Delete stuck transaction files from LittleFS
+    Serial.println("[System] 🧹 Cleaning stuck transaction files...");
+    if (LittleFS.begin(true)) {
+        const char* txFiles[] = {"/tx-1-422.json", "/tx-1-423.json", "/tx-1-424.json", "/tx-1-425.json"};
+        for (const char* file : txFiles) {
+            if (LittleFS.exists(file)) {
+                LittleFS.remove(file);
+                Serial.printf("[System]   Deleted: %s\n", file);
+            }
+        }
+        Serial.println("[System] ✅ Transaction cleanup complete");
+    }
+
     // Record startup
     Serial.printf("[System] Reboot count: %u\n", g_persistence.getRebootCount());
     g_persistence.recordRebootCount();
@@ -277,9 +291,9 @@ void setup()
         Serial.println("[CRITICAL] Failed to create UI_TASK!");
     }
 
-    // Initialize WiFi with auto-reconnect
-    Serial.println("[System] 📡 Initializing WiFi...");
-    g_wifiManager.begin(SECRET_WIFI_SSID, SECRET_WIFI_PASS);
+    // Initialize WiFi with auto-reconnect (Credentials now managed internally by priority)
+    Serial.println("[System] 📡 Initializing Multi-WiFi Failover...");
+    g_wifiManager.begin(nullptr, nullptr); 
     WiFi.setSleep(false); // Fix: Disable power save for stable WebSocket
 
     // Initialize security (TLS/WSS)
@@ -340,6 +354,7 @@ void loop()
     static unsigned long lastPlugCheck = 0;
     static float lastVoltageCheck = 0.0f;
     static unsigned long lastVoltageTime = 0;
+    static bool canRecoveryActive = false;  // Track CAN recovery state
     
     if (millis() - lastPlugCheck >= 500)
     {
@@ -381,8 +396,8 @@ void loop()
         }
         */
         
-        // Method 3: Voltage drop rate (>2V/s)
-        if (terminalVolt > 10.0f)
+        // Method 3: Voltage drop rate (>2V/s) - DISABLED during CAN recovery
+        if (terminalVolt > 10.0f && !canRecoveryActive)
         {
             if (lastVoltageTime > 0)
             {
@@ -399,9 +414,19 @@ void loop()
         }
         else
         {
-            // Reset tracking when voltage too low
+            // Reset tracking when voltage too low or CAN recovery active
             lastVoltageCheck = 0.0f;
             lastVoltageTime = 0;
+        }
+        
+        // Check charger health to detect CAN recovery
+        bool chargerHealthy = isChargerModuleHealthy();
+        if (!chargerHealthy) {
+            canRecoveryActive = true;
+            Serial.println("[PLUG] ⚠️  CAN recovery active - voltage-drop disconnect disabled");
+        } else if (canRecoveryActive) {
+            canRecoveryActive = false;
+            Serial.println("[PLUG] ✅ CAN recovered - voltage-drop disconnect re-enabled");
         }
         
         // Execute disconnect
@@ -464,8 +489,8 @@ void loop()
     
     if (shouldSendVehicleInfo)
     {
-        // Send once immediately, then every 30s to avoid flooding server
-        unsigned long interval = firstSendDone ? 30000 : 3000;
+        // Send once immediately, then every 10s to avoid flooding server
+        unsigned long interval = firstSendDone ? 10000 : 3000;
         
         if (millis() - lastVehicleInfoSent >= interval)
         {
@@ -624,7 +649,7 @@ void loop()
             {
                 Serial.printf("[CHARGER] 🚨 SAFETY: Charger offline during transaction (txId=%d)\n", activeTransactionId);
                 Serial.println("[CHARGER] 🔍 Check: CAN bus, charger power, hardware connection");
-                ocpp::endTransactionSafe(nullptr, "EVSEFailure");
+                ocpp::endTransactionSafe(nullptr, "Other", 1);  // Use "Other" instead of "EVSEFailure"
             }
         }
         
@@ -723,6 +748,24 @@ void loop()
     // Temperature monitoring
     static bool tempWarningActive = false;
     static bool tempCriticalActive = false;
+    
+    // FAULT LOCK AUTO-RECOVERY: Clear fault lock after stabilization period if conditions are safe
+    if (faultLockActive && (millis() - faultLockTime) >= FAULT_STABILIZATION_PERIOD_MS) {
+        bool conditionsSafe = (
+            bmsSafeToCharge &&
+            terminalVolt >= ALERT_VOLTAGE_MIN_V && terminalVolt <= ALERT_VOLTAGE_MAX_V &&
+            chargerTemp <= ALERT_TEMP_CRITICAL_C &&
+            terminalCurr <= ALERT_CURRENT_MAX_A
+        );
+        
+        if (conditionsSafe) {
+            Serial.println("[FAULT] ✅ Stabilization complete - conditions safe, clearing fault lock");
+            faultLockActive = false;
+        } else {
+            Serial.println("[FAULT] ⚠️  Stabilization period expired but conditions still unsafe - extending lock");
+            faultLockTime = millis(); // Extend lock
+        }
+    }
     
     if (chargerTemp > ALERT_TEMP_CRITICAL_C && !tempCriticalActive) {
         Serial.printf("[TEMP] 🚨 CRITICAL: Temperature %.1f°C (limit: %.0f°C)\n", chargerTemp, ALERT_TEMP_CRITICAL_C);
@@ -838,6 +881,29 @@ void loop()
         Serial.printf("[CURRENT] ✅ Normal: %.1fA\n", terminalCurr);
         ocpp::sendSystemAlert("CURRENT_NORMAL", "Current recovered", "Info");
         currentAlertActive = false;
+    }
+
+    // POST-TRANSACTION VehicleInfo: Send every 10s after charging stops until gun unplugged
+    static unsigned long lastPostTxVehicleInfo = 0;
+    bool shouldSendPostTxVehicleInfo = (
+        !transactionActive &&
+        !ocpp::isTransactionRunningSafe(1) &&
+        gunPhysicallyConnected &&
+        batteryConnected &&
+        terminalVolt > 56.0f &&
+        BMS_Imax > 0.0f &&
+        socPercent > 0.0f
+    );
+    
+    if (shouldSendPostTxVehicleInfo) {
+        if (millis() - lastPostTxVehicleInfo >= 10000) {
+            Serial.printf("[OCPP] 📊 Sending Post-Tx VehicleInfo: SOC=%.1f%% Energy=%.2fWh\n", 
+                         socPercent, energyWh);
+            ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);
+            lastPostTxVehicleInfo = millis();
+        }
+    } else {
+        lastPostTxVehicleInfo = 0;
     }
 
     // FIX #5: Yield to prevent watchdog timeout

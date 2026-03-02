@@ -44,6 +44,7 @@ namespace prod
         uint32_t lastPlugCheckTime = 0;
         bool plugConnected = false;
         bool lastPlugState = false;
+        bool lastBatteryState = false;
 
     public:
         /**

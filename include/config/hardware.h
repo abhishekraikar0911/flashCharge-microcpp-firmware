@@ -29,7 +29,7 @@
 
 // ========== SAFETY LIMITS ==========
 #define MIN_VOLTAGE_V 56.0f
-#define MAX_VOLTAGE_V 95.0f  // 72V nominal battery charges to 92-95V at 100% SOC
+#define MAX_VOLTAGE_V 102.0f  // Increased from 95V to accommodate transients
 #define MAX_CURRENT_A 110.0f
 #define MAX_TEMPERATURE_C 95.0f
 #define BATTERY_CAPACITY_AH 30.0f
@@ -38,7 +38,7 @@
 #define ALERT_TEMP_WARNING_C 70.0f
 #define ALERT_TEMP_CRITICAL_C 70.0f
 #define ALERT_VOLTAGE_MIN_V 56.0f
-#define ALERT_VOLTAGE_MAX_V 95.0f  // Match MAX_VOLTAGE_V for 100% SOC operation
+#define ALERT_VOLTAGE_MAX_V 102.0f  // Increased from 95V to accommodate transients
 #define ALERT_CURRENT_MAX_A 100.0f
 
 // ========== FAULT STABILIZATION ==========

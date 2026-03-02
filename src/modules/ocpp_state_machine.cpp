@@ -74,6 +74,33 @@ namespace prod
     {
         uint32_t now = millis();
 
+        // ═══════════════════════════════════════════════════════════════
+        // CRITICAL: HARDWARE HEALTH CHECK (Priority #1)
+        // ═══════════════════════════════════════════════════════════════
+        bool healthy = isChargerModuleHealthy();
+        
+        if (!healthy)
+        {
+            // Transition to Faulted if not already there
+            if (currentState != ConnectorState::Faulted)
+            {
+                Serial.println("[OCPP_SM] 🚨 HARDWARE FAULT DETECTED - Transitioning to FAULTED");
+                forceState(ConnectorState::Faulted);
+            }
+            // Block all other transitions while Faulted
+            return; 
+        }
+        else if (currentState == ConnectorState::Faulted)
+        {
+            // Recovery: Hardware is healthy again, return to Available
+            Serial.println("[OCPP_SM] ✅ HARDWARE RECOVERED - Returning to AVAILABLE");
+            forceState(ConnectorState::Available);
+            
+            // CRITICAL: Reset cached states to force re-evaluation of battery/plug
+            lastBatteryState = !batteryConnected; 
+            lastPlugState = !isPlugConnected();
+        }
+
         // Note: Charger health status is now handled by setEvseReadyInput in ocpp_manager.cpp
         // MicroOcpp library automatically manages connector status based on EVSE ready state
 
@@ -82,7 +109,6 @@ namespace prod
         //       Battery NOT connected → AVAILABLE state
         
         static uint32_t lastBatteryCheckTime = 0;
-        static bool lastBatteryState = false;
         
         if (now - lastBatteryCheckTime > PLUG_DEBOUNCE_MS)
         {
@@ -113,14 +139,16 @@ namespace prod
                     if (currentState != ConnectorState::Available && currentState != ConnectorState::Faulted)
                     {
                         Serial.printf("[OCPP_SM] 🔌 Battery disconnected - Transitioning from %s to AVAILABLE\n", getStateName());
-                        forceState(ConnectorState::Available);
                         
                         // Clear any active transaction if battery was yanked out
-                        if (currentState == ConnectorState::Charging)
+                        if (currentState == ConnectorState::Charging || currentState == ConnectorState::Preparing)
                         {
+                            Serial.println("[OCPP_SM] 🧹 Battery disconnected during transaction - clearing state");
                             g_persistence.clearTransaction();
                             g_healthMonitor.onTransactionEnded();
                         }
+                        
+                        forceState(ConnectorState::Available);
                     }
                 }
             }
@@ -274,14 +302,16 @@ namespace prod
     {
         Serial.printf("[OCPP_SM] 📤 RemoteStopTransaction: %d (currentState=%s)\n", transactionId, getStateName());
 
-        // CRITICAL FIX: Accept RemoteStop if transaction is active, regardless of connector state
-        // OCPP 1.6 spec: RemoteStop should work if transaction exists, not just in Charging state
-        if (transactionId > 0 && (currentState == ConnectorState::Charging || 
-                                   currentState == ConnectorState::Preparing ||
-                                   currentState == ConnectorState::SuspendedEV ||
-                                   currentState == ConnectorState::SuspendedEVSE))
+        // ROBUST STOP: Accept RemoteStop if we are in any active or "stuck" state
+        // This helps recover when server and client are out of sync on transaction IDs
+        bool isActive = (currentState == ConnectorState::Charging || 
+                         currentState == ConnectorState::Preparing ||
+                         currentState == ConnectorState::SuspendedEV ||
+                         currentState == ConnectorState::SuspendedEVSE);
+                         
+        if (isActive || (currentState == ConnectorState::Finishing))
         {
-            Serial.println("[OCPP_SM] ✅ RemoteStop accepted - moving to Finishing");
+            Serial.printf("[OCPP_SM] ✅ RemoteStop accepted (state=%s) - moving to Finishing\n", getStateName());
             forceState(ConnectorState::Finishing);
             return true;
         }

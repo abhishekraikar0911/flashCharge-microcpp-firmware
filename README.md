@@ -237,6 +237,37 @@ See [Documentation Index](docs/README.md) for complete list.
 
 ## 🔧 Troubleshooting
 
+### Charger Fault at Startup (NEW - CRITICAL!)
+
+```
+[OCPP] StatusNotification: Faulted / OtherError
+[OCPP] RemoteStart: REJECTED
+```
+**Root Cause**: Charger module expects both CAN IDs (0x068181FE and 0x068182FE) at startup. Previous firmware only sent Group 2 when gun was connected.
+
+**Solution**: Firmware v2.5.1 fixes this by:
+1. Sending both groups at startup (initialization sequence)
+2. Always sending both groups continuously (not conditional)
+3. Re-initializing after CAN recovery
+
+**See**: [CHARGER_FAULT_FIX.md](CHARGER_FAULT_FIX.md) for detailed explanation
+
+### CAN Bus Stability Issues
+
+```
+[CAN] 🚨 BUS-OFF detected, initiating recovery...
+```
+**Solution**: See comprehensive fix guides:
+- **[CAN Bus Fixes Summary](CAN_BUS_FIXES_SUMMARY.md)** - Quick reference for all fixes
+- **[Firmware Fixes](FIRMWARE_FIXES_IMPLEMENTED.md)** - Detailed firmware changes (v2.5.0)
+- **[Hardware Fixes Guide](HARDWARE_FIXES_GUIDE.md)** - Step-by-step hardware improvements
+
+**Quick Fixes**:
+1. Add 120Ω termination resistors at both ends of CAN bus
+2. Replace with shielded twisted-pair cable (CAT5e)
+3. Route CAN wires away from 30A power cables
+4. Verify common ground between ESP32 and charger module
+
 ### WiFi Connection Issues
 
 ```
@@ -335,7 +366,18 @@ Priority 2: UI Console
 
 ## 📝 Version History
 
-- **v2.0** (Current) - Production-ready with OCPP 1.6, CAN bus, WiFi auto-reconnect
+- **v2.5.1** (January 2025) - CRITICAL: Charger fault fix
+  - Fixed charger entering fault state at startup
+  - Send both CAN groups (0x068181FE and 0x068182FE) at initialization
+  - Removed conditional Group 2 sending (always send both groups)
+  - Added re-initialization after CAN recovery
+  - See [CHARGER_FAULT_FIX.md](CHARGER_FAULT_FIX.md) for details
+- **v2.5.0** (January 2025) - CAN bus stability improvements
+  - Increased CAN recovery tolerance (5s timeout)
+  - Disable voltage-drop disconnect during CAN recovery
+  - Global CAN recovery flag for cross-task coordination
+  - See [FIRMWARE_FIXES_IMPLEMENTED.md](FIRMWARE_FIXES_IMPLEMENTED.md) for details
+- **v2.0** - Production-ready with OCPP 1.6, CAN bus, WiFi auto-reconnect
 - **v1.0** - Initial prototype
 
 ## 📄 License

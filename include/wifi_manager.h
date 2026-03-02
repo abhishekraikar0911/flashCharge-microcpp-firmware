@@ -15,17 +15,29 @@
 namespace prod
 {
 
+    struct WiFiCredential {
+        const char* ssid;
+        const char* password;
+    };
+
     class WiFiManager
     {
     private:
-        static const uint32_t CONNECT_TIMEOUT_MS = 20000;
+        static const uint32_t CONNECT_TIMEOUT_MS = 15000;
         static const uint32_t RECONNECT_CHECK_INTERVAL = 5000;
-        static const uint32_t MAX_RECONNECT_ATTEMPTS = 5;
-        static const uint32_t RECONNECT_BACKOFF_MS = 5000;
+        static const uint32_t MAX_RECONNECT_ATTEMPTS = 3;
+        static const uint32_t RECONNECT_BACKOFF_MS = 3000;
+        static const uint32_t PRIORITY_SWITCH_CHECK_INTERVAL = 180000; // 3 minutes
 
+        WiFiCredential credentials[3];
+        int numCredentials = 0;
+        int currentPriorityIndex = 0;
+        uint32_t lastPriorityCheck = 0;
         uint32_t lastReconnectAttempt = 0;
         uint32_t reconnectAttempts = 0;
         bool wifiFailureReported = false;
+        bool attemptConnection(int index);
+        bool isInitiated = false;
 
     public:
         /**

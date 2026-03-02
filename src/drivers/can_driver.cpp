@@ -1,5 +1,6 @@
 #include "../../include/drivers/can_driver.h"
 #include "../../include/header.h"
+#include "../../include/config/hardware.h"
 
 // New CAN driver buffer item (different from legacy RxBufItem)
 struct CanRxItem
@@ -71,7 +72,7 @@ namespace CAN
         
         // Take mutex to prevent RX task from accessing driver during init
         if (canRecoveryMutex && xSemaphoreTake(canRecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)21, (gpio_num_t)22, TWAI_MODE_NORMAL);
+            twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN1_TX_PIN, CAN1_RX_PIN, TWAI_MODE_NORMAL);
             twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
             twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
