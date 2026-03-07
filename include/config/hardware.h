@@ -54,16 +54,16 @@
 #define WATCHDOG_TIMEOUT_S 30
 
 // ========== TASK STACK SIZES ==========
-#define TASK_STACK_SIZE_CAN_RX 4096
-#define TASK_STACK_SIZE_CHARGER_COMM 4096
+#define TASK_STACK_SIZE_CAN_RX 6144       // Increased from 4096 — proven stable
+#define TASK_STACK_SIZE_CHARGER_COMM 6144  // Increased from 4096 — prevents stack overflow
 #define TASK_STACK_SIZE_UI 4096
-#define TASK_STACK_SIZE_OCPP 8192
+#define TASK_STACK_SIZE_OCPP 16384         // Increased from 10240 — WSS/TLS (MbedTLS) handshake needs 16KB
 #define TASK_STACK_SIZE_WATCHDOG 2048
 
 // ========== TASK PRIORITIES ==========
-#define TASK_PRIORITY_WATCHDOG 6
-#define TASK_PRIORITY_CAN_RX 5
-#define TASK_PRIORITY_CHARGER_COMM 4
+#define TASK_PRIORITY_WATCHDOG 9
+#define TASK_PRIORITY_CAN_RX 8            // Safety-critical: highest after watchdog
+#define TASK_PRIORITY_CHARGER_COMM 7      // Safety-critical: charger hardware control
 #define TASK_PRIORITY_OCPP 3
 #define TASK_PRIORITY_UI 2
 
@@ -90,7 +90,7 @@
  * - Production: Set to 0 (default)
  */
 #ifndef ENABLE_TEST_MODE
-#define ENABLE_TEST_MODE 1  // ⚠️  SET TO 0 FOR PRODUCTION!
+#define ENABLE_TEST_MODE 0  // ✅ PRODUCTION MODE — all safety checks enforced
 #endif
 
 #if ENABLE_TEST_MODE

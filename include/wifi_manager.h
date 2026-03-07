@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <time.h>
 
 /**
  * @file wifi_manager.h
@@ -75,6 +76,11 @@ namespace prod
          * Get reconnection attempt count
          */
         uint32_t getAttemptCount() const { return reconnectAttempts; }
+
+        /**
+         * Sync time via NTP (required for TLS certificate validation)
+         */
+        void syncNTP();
     };
 
     extern WiFiManager g_wifiManager;

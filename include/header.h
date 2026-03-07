@@ -191,10 +191,12 @@ inline void safePrintf(const char *format, ...)
 {
     if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
     {
+        char buf[256];
         va_list args;
         va_start(args, format);
-        Serial.printf(format, args);
+        vsnprintf(buf, sizeof(buf), format, args);
         va_end(args);
+        Serial.print(buf);
         xSemaphoreGive(serialMutex);
     }
 }

@@ -135,20 +135,24 @@ namespace prod
                 }
                 else
                 {
-                    // Battery NOT connected → Transition to AVAILABLE
+                    // Battery NOT connected → Transition to AVAILABLE (only if plug also gone)
                     if (currentState != ConnectorState::Available && currentState != ConnectorState::Faulted)
                     {
-                        Serial.printf("[OCPP_SM] 🔌 Battery disconnected - Transitioning from %s to AVAILABLE\n", getStateName());
-                        
-                        // Clear any active transaction if battery was yanked out
-                        if (currentState == ConnectorState::Charging || currentState == ConnectorState::Preparing)
-                        {
-                            Serial.println("[OCPP_SM] 🧹 Battery disconnected during transaction - clearing state");
-                            g_persistence.clearTransaction();
-                            g_healthMonitor.onTransactionEnded();
+                        if (!isPlugConnected()) {
+                            Serial.printf("[OCPP_SM] 🔌 Battery disconnected & Plug gone - Transitioning from %s to AVAILABLE\n", getStateName());
+                            
+                            // Clear any active transaction
+                            if (currentState == ConnectorState::Charging || currentState == ConnectorState::Preparing)
+                            {
+                                Serial.println("[OCPP_SM] 🧹 Cleanup: Clearing transaction state");
+                                g_persistence.clearTransaction();
+                                g_healthMonitor.onTransactionEnded();
+                            }
+                            
+                            forceState(ConnectorState::Available);
+                        } else {
+                            Serial.println("[OCPP_SM] 🔌 Battery disconnected, but Plug still present - Staying in current state");
                         }
-                        
-                        forceState(ConnectorState::Available);
                     }
                 }
             }
@@ -173,11 +177,15 @@ namespace prod
                 
                 if (!currentPlugState && currentState == ConnectorState::Finishing)
                 {
-                    // Only transition to Available after transaction fully ended
-                    Serial.println("[OCPP_SM] 🔄 Plug removed after Finishing, ready for Available");
-                    forceState(ConnectorState::Available);
-                    g_persistence.clearTransaction();
-                    g_healthMonitor.onTransactionEnded();
+                    // Only transition to Available after transaction fully ended AND battery also gone
+                    if (!batteryConnected) {
+                        Serial.println("[OCPP_SM] 🔄 Plug removed and battery gone after Finishing, ready for Available");
+                        forceState(ConnectorState::Available);
+                        g_persistence.clearTransaction();
+                        g_healthMonitor.onTransactionEnded();
+                    } else {
+                        Serial.println("[OCPP_SM] 🔄 Plug removed but battery still reported connected - Staying in Finishing");
+                    }
                 }
             }
         }
@@ -187,13 +195,22 @@ namespace prod
 
         if (currentState == ConnectorState::Finishing && stateAge > FINISHING_TIMEOUT_MS)
         {
-            // Timeout: Force transition to Available after 10s
-            Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - transitioning to Available\n",
-                          FINISHING_TIMEOUT_MS / 1000.0f);
-            forceState(ConnectorState::Available);
-            g_persistence.clearTransaction();
-            g_healthMonitor.onTransactionEnded();
+            // Timeout: Force transition to Available - ONLY if vehicle has unplugged
+            // If vehicle is still connected, stay in Finishing and wait for physical disconnect
+            if (!isPlugConnected() && !batteryConnected) {
+                Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - vehicle gone, transitioning to Available\n",
+                              FINISHING_TIMEOUT_MS / 1000.0f);
+                forceState(ConnectorState::Available);
+                g_persistence.clearTransaction();
+                g_healthMonitor.onTransactionEnded();
+            } else {
+                // Vehicle still connected - reset the timer so we don't spam this log
+                Serial.printf("[OCPP_SM] ⏱️  Finishing timeout reached but vehicle still connected (gun=%d batt=%d) - waiting for unplug\n",
+                              (int)isPlugConnected(), (int)batteryConnected);
+                stateEnterTime = now; // Reset timer to check again after another FINISHING_TIMEOUT_MS
+            }
         }
+
     }
 
     void OCPPStateMachine::onTransactionStarted(int connectorId, const char *idTag, int transactionId)
@@ -237,8 +254,18 @@ namespace prod
     {
         Serial.printf("[OCPP_SM] 🛑 Transaction stopped: %d\n", transactionId);
 
-        // Clear state machine to Available
-        forceState(ConnectorState::Available);
+        // CRITICAL FIX: Only go to Available if the vehicle has been unplugged.
+        // If the gun is still connected, stay in Finishing so the user knows
+        // the session is over but the vehicle is still connected.
+        // The poll() timeout will handle the Finishing → Available transition.
+        if (isPlugConnected() || batteryConnected) {
+            Serial.println("[OCPP_SM] 🔌 Vehicle still connected - transitioning to FINISHING");
+            forceState(ConnectorState::Finishing);
+        } else {
+            Serial.println("[OCPP_SM] 🔌 Vehicle disconnected - transitioning to AVAILABLE");
+            forceState(ConnectorState::Available);
+        }
+
         g_healthMonitor.onTransactionEnded();
         g_persistence.clearTransaction();
     }

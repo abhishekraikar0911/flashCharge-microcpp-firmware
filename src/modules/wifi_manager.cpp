@@ -53,10 +53,39 @@ namespace prod
             currentPriorityIndex = index;
             lastReconnectAttempt = millis();
             reconnectAttempts = 0;
+            
+            // NTP Time Sync — REQUIRED for TLS certificate validation
+            syncNTP();
+            
             return true;
         } else {
             Serial.printf("\n[WiFi] ❌ Priority %d failed\n", index + 1);
             return false;
+        }
+    }
+
+    void WiFiManager::syncNTP() {
+        Serial.println("[NTP] 🕐 Syncing time (required for WSS/TLS)...");
+        
+        // IST offset = 19800s (5h30m), no DST
+        configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
+        
+        // Wait for valid time (max 10 seconds)
+        unsigned long ntpStart = millis();
+        time_t now = time(nullptr);
+        while (now < 1000000000L && millis() - ntpStart < 10000) {
+            delay(250);
+            now = time(nullptr);
+        }
+        
+        if (now > 1000000000L) {
+            struct tm timeinfo;
+            localtime_r(&now, &timeinfo);
+            char timeStr[64];
+            strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S IST", &timeinfo);
+            Serial.printf("[NTP] ✅ Time synced: %s\n", timeStr);
+        } else {
+            Serial.println("[NTP] ⚠️  Time sync failed — TLS may reject certificates!");
         }
     }
 

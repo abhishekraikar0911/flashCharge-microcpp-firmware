@@ -1,6 +1,7 @@
 // OCPP Manager: All OCPP-related logic isolated for easy debugging
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
@@ -12,6 +13,7 @@
 #include "../../include/header.h"
 #include "../../include/modules/ota_manager.h"
 #include "../../include/ocpp_state_machine.h"
+#include "../../include/config/certificates.h"
 #include <MicroOcpp/Core/Context.h>
 #include <MicroOcpp/Model/Model.h>
 #include <MicroOcpp/Model/Boot/BootService.h>
@@ -146,26 +148,30 @@ bool ocpp::init()
 
     // Test network connectivity to server BEFORE initializing WebSocket
     Serial.println("[OCPP] 🔍 Testing TCP connectivity to server...");
-    Serial.printf("[OCPP] 🎯 Target: %s:%d\\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
+    Serial.printf("[OCPP] 🎯 Target: %s:%d\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
     
-    WiFiClient testClient;
-    bool serverReachable = testClient.connect(SECRET_CSMS_HOST, SECRET_CSMS_PORT, 5000);
+    WiFiClientSecure testClient;
+    testClient.setCACert(ISRG_ROOT_X1_CERT);  // Use Root CA for TLS test
+    bool serverReachable = testClient.connect(SECRET_CSMS_HOST, SECRET_CSMS_PORT, 10000);  // 10s timeout for TLS
     
     if (serverReachable) {
-        Serial.println("[OCPP] ✅ TCP connection successful - server is reachable");
+        Serial.println("[OCPP] ✅ TLS connection successful - server is reachable");
         testClient.stop();
     } else {
-        Serial.println("[OCPP] ❌ FAILED: Cannot reach server");
+        Serial.println("[OCPP] ❌ FAILED: Cannot reach server via TLS");
         Serial.println("[OCPP] ⚠️  Possible causes:");
-        Serial.println("[OCPP]    - Firewall blocking outbound connections");
-        Serial.println("[OCPP]    - Server not listening on port 8080");
-        Serial.println("[OCPP]    - Network routing issue");
+        Serial.println("[OCPP]    - DNS resolution failed for domain");
+        Serial.println("[OCPP]    - Firewall blocking port 443");
+        Serial.println("[OCPP]    - NTP time not synced (cert validation fails)");
+        Serial.println("[OCPP]    - Server SSL certificate issue");
         Serial.println("[OCPP] 🔄 Will retry WebSocket connection anyway...");
-        // Don't return false - let MicroOCPP try anyway (it has retry logic)
     }
 
-    // NOW initialize MicroOCPP FIRST
-    Serial.println("[OCPP] 🚀 Calling mocpp_initialize()...");
+    // Heap monitoring for TLS impact
+    Serial.printf("[OCPP] 📊 Free heap BEFORE mocpp_initialize: %u bytes\n", ESP.getFreeHeap());
+
+    // NOW initialize MicroOCPP with WSS + Root CA
+    Serial.println("[OCPP] 🔐 Calling mocpp_initialize() with WSS/TLS...");
     {
         OcppLock lock;
         if (!lock.ok())
@@ -177,9 +183,14 @@ bool ocpp::init()
             SECRET_CSMS_URL,
             SECRET_CHARGER_ID,
             SECRET_CHARGER_MODEL,
-            SECRET_CHARGER_VENDOR);
+            SECRET_CHARGER_VENDOR,
+            MicroOcpp::FilesystemOpt::Use,  // filesystem
+            nullptr,                         // password (no basic auth)
+            ISRG_ROOT_X1_CERT);             // Root CA certificate for TLS
         Serial.println("[OCPP] ✅ mocpp_initialize() completed");
     }
+
+    Serial.printf("[OCPP] 📊 Free heap AFTER mocpp_initialize: %u bytes\n", ESP.getFreeHeap());
 
     // CRITICAL: Configure all inputs AFTER mocpp_initialize()
     Serial.println("[OCPP] 📋 Registering input callbacks...");
@@ -193,19 +204,17 @@ bool ocpp::init()
             return false;
         }
         setEnergyMeterInput([]() {
-            int energyInt = 0;
+            float energy = 0.0f;
             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 // Ensure energyWh is never negative
                 if (energyWh < 0.0f) {
                     energyWh = 0.0f;
                 }
-                // Return as integer Wh (OCPP expects Wh, not kWh)
-                energyInt = (int)energyWh;
-                if (energyInt < 0) energyInt = 0;  // Double-check
+                energy = energyWh;
                 xSemaphoreGive(dataMutex);
             }
-            Serial.printf("[METER_DEBUG] Energy=%dWh\n", energyInt);
-            return energyInt;
+            Serial.printf("[METER_DEBUG] Energy=%.2fWh\n", energy);
+            return energy;
         });
     }
     Serial.println("[OCPP]   ✓ Energy meter registered");
@@ -381,10 +390,10 @@ bool ocpp::init()
             Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
             return false;
         }
-        // TEST: Set MeterValue interval to 5s for debugging
+        // PRODUCTION: Set MeterValue interval to 10s (balanced queue pressure vs data freshness)
         if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval")) {
-            config->setInt(5);  // 5s for testing (change to 60s for production)
-            Serial.println("[OCPP]   ✓ MeterValues interval: 5s (testing mode)");
+            config->setInt(10);  // 10s for production (was 5s — caused queue flooding)
+            Serial.println("[OCPP]   ✓ MeterValues interval: 10s (production)");
         }
         
         if (auto config = MicroOcpp::getConfigurationPublic("ClockAlignedDataInterval")) {
@@ -671,6 +680,21 @@ bool ocpp::init()
                 // Record stop time for post-transaction summaries
                 txStopTime = millis();
                 
+                // 📊 Send final session summary (Float energy, SOC, Duration)
+                float durationMin = (txStartTime > 0) ? (float)(txStopTime - txStartTime) / 60000.0f : 0.0f;
+                float finalEnergy = 0.0f;
+                float finalSoc = 0.0f;
+                
+                if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    finalEnergy = energyWh;
+                    finalSoc = socPercent;
+                    xSemaphoreGive(dataMutex);
+                }
+                
+                Serial.printf("[OCPP] 📊 Session Ended: Energy=%.2fWh SOC=%.1f%% Duration=%.1fmin\n", 
+                              finalEnergy, finalSoc, durationMin);
+                ocpp::sendSessionSummary(finalSoc, finalEnergy, durationMin);
+                
                 // Clear all transaction state
                 transactionLocked = false;
                 localTransactionId = -1;
@@ -859,15 +883,20 @@ void ocpp::poll()
         mocpp_loop();
 
         // CLEANUP: Force-stop old transactions after BootNotification
+        // Only trigger once per boot
         if (!oldTransactionCleaned && isOperative()) {
             auto tx = getTransaction(1);
-            if (tx && tx->isActive()) {
+            
+            // Check if this transaction existed BEFORE we finished initialization
+            // Fresh transactions started immediately after BootNotification will have a valid ID 
+            // and should NOT be cleaned up.
+            if (tx && tx->isActive() && (tx->getTransactionId() < 0 || !transactionActive)) {
                 int oldTxId = tx->getTransactionId();
                 Serial.printf("[OCPP] 🧹 Cleaning up old transaction (txId=%d)\n", oldTxId);
                 
-                cleanupInProgress = true;  // Block sync
+                cleanupInProgress = true;
                 
-                // Force stop the old transaction
+                // Force stop ONLY the old transaction
                 chargingEnabled = false;
                 endTransaction(nullptr, "PowerLoss", 1);
                 
@@ -878,12 +907,18 @@ void ocpp::poll()
                 localTransactionId = -1;
                 remoteStartAccepted = false;
                 
-                // CRITICAL: Force state machine to Available
-                prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+                // CRITICAL: Pulse the state machine to ensure it's not stuck
+                // FIX: Respect Finishing state during cleanup
+                if (prod::g_ocppStateMachine.getState() != prod::ConnectorState::Finishing) {
+                    if (gunPhysicallyConnected && batteryConnected) {
+                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
+                    } else {
+                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+                    }
+                }
                 
                 Serial.println("[OCPP] ✅ Old transaction cleaned - ready for new RemoteStart");
-                
-                cleanupInProgress = false;  // Re-enable sync
+                cleanupInProgress = false;
             }
             oldTransactionCleaned = true;
         }
@@ -906,13 +941,15 @@ void ocpp::poll()
                 remoteStartAccepted = false;
                 chargingEnabled = false;
                 
-                // FIX: Force state machine to sync with reality
-                if (gunPhysicallyConnected && batteryConnected) {
-                    Serial.println("[OCPP] 🔄 Vehicle connected - forcing state to Preparing");
-                    prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
-                } else {
-                    Serial.println("[OCPP] 🔄 No vehicle - forcing state to Available");
-                    prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+                // FIX: Respect Finishing state during stale state cleanup
+                if (prod::g_ocppStateMachine.getState() != prod::ConnectorState::Finishing) {
+                    if (gunPhysicallyConnected && batteryConnected) {
+                        Serial.println("[OCPP] 🔄 Vehicle connected - forcing state to Preparing");
+                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
+                    } else {
+                        Serial.println("[OCPP] 🔄 No vehicle - forcing state to Available");
+                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
+                    }
                 }
                 
                 Serial.println("[OCPP] ✅ Stale state cleared - ready for new RemoteStart");
@@ -1052,6 +1089,9 @@ bool ocpp::isConnected()
     return operative;
 }
 
+// RATE-LIMIT: Track whether a VehicleInfo DataTransfer is still pending in the queue
+static bool vehicleInfoPending = false;
+
 void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float current, float temperature, uint8_t model, float range, const char* vin)
 {
     OcppLock lock;
@@ -1060,6 +1100,12 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
         return;
     }
     if (!isOperative()) {
+        return;
+    }
+
+    // RATE-LIMIT: Don't queue if previous VehicleInfo hasn't received a response yet
+    if (vehicleInfoPending) {
+        Serial.println("[OCPP] ⏳ VehicleInfo skipped — previous still pending in queue");
         return;
     }
 
@@ -1076,6 +1122,8 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     // VehicleInfo logging
     Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (Pre-Tx):\n");
     Serial.printf("  SOC=%.1f%% | Model=%s | Range=%.1fkm | MaxI=%.1fA | VIN=%s\n", soc, modelName, range, maxCurrent, vin);
+
+    vehicleInfoPending = true;  // Mark as pending BEFORE queuing
 
     sendRequest("DataTransfer",
         [soc, maxCurrent, model, range, modelName, vin]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
@@ -1098,9 +1146,7 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
             return doc;
         },
         [](JsonObject response) {
-            // [DISABLED] VehicleInfo response logging - removed for cleaner console
-            // const char* status = response["status"] | "Unknown";
-            // Serial.printf("[OCPP] ✅ VehicleInfo response: %s\n\n", status);
+            vehicleInfoPending = false;  // Clear pending flag — ready for next send
         }
     );
 }

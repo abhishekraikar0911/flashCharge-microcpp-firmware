@@ -147,15 +147,28 @@ void setup()
         }
     }
 
-    // CRITICAL FIX: Delete stuck transaction files from LittleFS
+    // Clean stale transaction files from LittleFS dynamically
     Serial.println("[System] 🧹 Cleaning stuck transaction files...");
     if (LittleFS.begin(true)) {
-        const char* txFiles[] = {"/tx-1-422.json", "/tx-1-423.json", "/tx-1-424.json", "/tx-1-425.json"};
-        for (const char* file : txFiles) {
-            if (LittleFS.exists(file)) {
-                LittleFS.remove(file);
-                Serial.printf("[System]   Deleted: %s\n", file);
+        File root = LittleFS.open("/");
+        if (root && root.isDirectory()) {
+            File entry = root.openNextFile();
+            while (entry) {
+                const char* name = entry.name();
+                // Match any /tx-*.json pattern
+                if (strncmp(name, "tx-", 3) == 0 && strstr(name, ".json") != nullptr) {
+                    char fullPath[64];
+                    snprintf(fullPath, sizeof(fullPath), "/%s", name);
+                    entry.close();
+                    LittleFS.remove(fullPath);
+                    Serial.printf("[System]   Deleted: %s\n", fullPath);
+                    entry = root.openNextFile();
+                    continue;
+                }
+                entry.close();
+                entry = root.openNextFile();
             }
+            root.close();
         }
         Serial.println("[System] ✅ Transaction cleanup complete");
     }
@@ -191,9 +204,9 @@ void setup()
     BaseType_t can1RxResult = xTaskCreatePinnedToCore(
         can1_rx_task,
         "CAN1_RX",
-        6144,
+        TASK_STACK_SIZE_CAN_RX,
         nullptr,
-        8,
+        TASK_PRIORITY_CAN_RX,
         &can1RxHandle,
         1);
     
@@ -211,9 +224,9 @@ void setup()
     BaseType_t can2RxResult = xTaskCreatePinnedToCore(
         can2_rx_task,
         "CAN2_RX",
-        6144,
+        TASK_STACK_SIZE_CAN_RX,
         nullptr,
-        8,
+        TASK_PRIORITY_CAN_RX,
         &can2RxHandle,
         1);
     
@@ -231,9 +244,9 @@ void setup()
     BaseType_t chargerResult = xTaskCreatePinnedToCore(
         chargerCommTask,
         "CHARGER_COMM",
-        6144, // Increased from 4096 to prevent stack overflow
+        TASK_STACK_SIZE_CHARGER_COMM,
         nullptr,
-        7, // Increased from 4 - safety-critical
+        TASK_PRIORITY_CHARGER_COMM,
         &chargerHandle,
         1);
     
@@ -251,9 +264,9 @@ void setup()
     BaseType_t ocppResult = xTaskCreatePinnedToCore(
         ocppTask,
         "OCPP_LOOP",
-        10240, // Increased from 8192 for WebSocket + TLS overhead
+        TASK_STACK_SIZE_OCPP,
         nullptr,
-        3, // Lower priority than CAN, but dedicated to avoid blocking
+        TASK_PRIORITY_OCPP,
         &ocppTaskHandle,
         0); // Core 0 for OCPP
     
@@ -489,13 +502,16 @@ void loop()
     
     if (shouldSendVehicleInfo)
     {
-        // Send once immediately, then every 10s to avoid flooding server
-        unsigned long interval = firstSendDone ? 10000 : 3000;
+        // PRODUCTION: Send once immediately on plug-in, then every 5min OR on >1% SOC change
+        static float lastSentSoc = -1.0f;
+        bool socChanged = (lastSentSoc >= 0.0f && fabsf(socPercent - lastSentSoc) >= 1.0f);
+        unsigned long interval = firstSendDone ? 300000 : 3000;  // 5min (was 15s) or 3s for first
         
-        if (millis() - lastVehicleInfoSent >= interval)
+        if (millis() - lastVehicleInfoSent >= interval || socChanged)
         {
             ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);
             lastVehicleInfoSent = millis();
+            lastSentSoc = socPercent;
             firstSendDone = true;
         }
         
@@ -883,9 +899,18 @@ void loop()
         currentAlertActive = false;
     }
 
-    // POST-TRANSACTION VehicleInfo: Send every 10s after charging stops until gun unplugged
+    // POST-TRANSACTION VehicleInfo: Send every 30s after charging stops until gun unplugged
+    // FIX3: Added sessionEverCompleted gate — prevents sending Energy=0.00Wh at boot
     static unsigned long lastPostTxVehicleInfo = 0;
+    static bool sessionEverCompleted = false;
+
+    // Mark session as completed when a real StopTransaction is processed
+    if (txStopTime > 0 && !transactionActive) {
+        sessionEverCompleted = true;
+    }
+
     bool shouldSendPostTxVehicleInfo = (
+        sessionEverCompleted &&   // FIX3: Only after a real session has ended
         !transactionActive &&
         !ocpp::isTransactionRunningSafe(1) &&
         gunPhysicallyConnected &&
@@ -896,7 +921,8 @@ void loop()
     );
     
     if (shouldSendPostTxVehicleInfo) {
-        if (millis() - lastPostTxVehicleInfo >= 10000) {
+        // PRODUCTION: Increased Post-Tx interval to 300s (5min, was 30s) to reduce queue pressure
+        if (millis() - lastPostTxVehicleInfo >= 300000) {
             Serial.printf("[OCPP] 📊 Sending Post-Tx VehicleInfo: SOC=%.1f%% Energy=%.2fWh\n", 
                          socPercent, energyWh);
             ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);

@@ -36,7 +36,7 @@ namespace prod
     class OCPPStateMachine
     {
     private:
-        static const uint32_t FINISHING_TIMEOUT_MS = 10000; // 10 seconds
+        static const uint32_t FINISHING_TIMEOUT_MS = 120000; // 120 seconds (extended to allow vehicle to fully unplug)
         static const uint32_t PLUG_DEBOUNCE_MS = 500;
 
         ConnectorState currentState = ConnectorState::Available;

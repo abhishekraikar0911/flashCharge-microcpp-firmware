@@ -638,7 +638,8 @@ bool isChargerModuleHealthy()
         return true;
     }
 
-    const unsigned long CHARGER_TIMEOUT_MS = 5000; // 5 seconds timeout
+    const unsigned long CHARGER_TIMEOUT_MS = 10000; // FIX2: Increased from 5s to 10s
+                                                     // Prevents false Faulted on brief CAN spikes
     
     // Check if we're receiving critical CAN messages from charger
     bool terminalPowerOk = (now - lastTerminalPower) < CHARGER_TIMEOUT_MS;
@@ -649,15 +650,15 @@ bool isChargerModuleHealthy()
     int healthyCount = (terminalPowerOk ? 1 : 0) + (terminalStatusOk ? 1 : 0) + (heartbeatOk ? 1 : 0);
     bool currentReadingHealthy = (healthyCount >= 2);
 
-    // Fault Debouncing (CRITICAL):
-    // Only transition to FAULTED if we haven't seen a healthy state for > 3 seconds.
-    // This prevents momentary CAN BUS-OFF/Recovery cycles from flapping the OCPP status.
+    // FIX2: Fault Debouncing increased from 3s to 10s
+    // Previously, charger had to miss only ~8s of CAN messages to trigger Faulted.
+    // Now requires 10s of no healthy readings before transitioning to FAULTED.
     static unsigned long lastHealthyTime = now;
     if (currentReadingHealthy) {
         lastHealthyTime = now;
     }
 
-    bool healthy = (now - lastHealthyTime < 3000);
+    bool healthy = (now - lastHealthyTime < 10000); // FIX2: was 3000
     
     // Log health status changes
     static bool lastHealthStatus = true;

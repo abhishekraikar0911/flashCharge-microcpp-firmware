@@ -24,7 +24,7 @@ inline const char* getStateStr(twai_state_t state) {
 
 // Print formatted CAN status report
 inline void printStatusReport(const twai_status_info_t& status) {
-    LOG_SECTION_START("CAN BUS STATUS");
+    LOG_SECTION_START("CAN BUS 1 (CHARGER) STATUS");
     
     LOG_DATA("State", getStateStr(status.state));
     LOG_DATA("TX Error Counter", status.tx_error_counter);
@@ -35,6 +35,19 @@ inline void printStatusReport(const twai_status_info_t& status) {
     LOG_DATA("Bus Error Count", status.bus_error_count);
     LOG_DATA("TX Queue", status.msgs_to_tx);
     LOG_DATA("RX Queue", status.msgs_to_rx);
+    
+    LOG_SECTION_END();
+}
+
+// Print formatted MCP2515 status report (CAN2)
+inline void printMCP2515Status(const char* state, uint8_t tec, uint8_t rec, uint32_t total_rx, uint32_t total_tx) {
+    LOG_SECTION_START("CAN BUS 2 (BMS) STATUS");
+    
+    LOG_DATA("State", state);
+    LOG_DATA("TX Error Counter", tec);
+    LOG_DATA("RX Error Counter", rec);
+    LOG_DATA("Total RX Success", total_rx);
+    LOG_DATA("Total TX Success", total_tx);
     
     LOG_SECTION_END();
 }
