@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_task_wdt.h>
 #include <WiFi.h>
 #include <nvs_flash.h>
 #include <LittleFS.h>
@@ -12,6 +13,7 @@
 #include "../include/ocpp/ocpp_client.h"
 #include "../include/production_config.h"
 #include "../include/wifi_manager.h"
+#include "../include/modules/network_manager.h"
 #include "../include/health_monitor.h"
 #include "../include/ocpp_state_machine.h"
 #include "../include/security_manager.h"
@@ -20,6 +22,7 @@
 #include "../include/drivers/can_mcp2515_driver.h"
 #include "../include/config/version.h"
 #include "../include/config/hardware.h"
+#include "../include/modules/hardware_service.h"
 
 extern void processDebugCommand(char c);
 
@@ -41,7 +44,7 @@ void ocppTask(void *pvParameters)
     {
         if (!ocppInitialized)
         {
-            if (WiFi.status() == WL_CONNECTED && (int32_t)(millis() - nextAttemptMs) >= 0)
+            if (prod::g_networkManager.isConnected() && (int32_t)(millis() - nextAttemptMs) >= 0)
             {
                 Serial.printf("[OCPP] Init attempt (backoff %u ms)\n", backoffMs);
                 if (ocpp::init())
@@ -56,13 +59,13 @@ void ocppTask(void *pvParameters)
                 }
             }
 
-            g_healthMonitor.feed();
+            // g_healthMonitor.feed(); // DISABLED: Testing GSM step-by-step
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
         ocpp::poll();
-        g_healthMonitor.feed();
+        // g_healthMonitor.feed(); // DISABLED: Testing GSM step-by-step / User requested disable
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -71,7 +74,27 @@ void ocppTask(void *pvParameters)
 void setup()
 {
     Serial.begin(115200);
-    delay(500);
+    // STABILITY: 5s initial delay for power-on rails to stabilize 
+    // especially for GSM and CAN transceivers.
+    delay(5000); 
+
+    // Visual heartbeat setup
+    pinMode(LED_WIFI, OUTPUT);
+    digitalWrite(LED_WIFI, HIGH); // On during boot
+
+    // TEMPORARY: Aggressively disable ALL watchdog timers for verification testing
+    // Step 1: Remove IDLE tasks from TWDT (they are added by default in ESP-IDF)
+    TaskHandle_t idle0 = xTaskGetIdleTaskHandleForCPU(0);
+    TaskHandle_t idle1 = xTaskGetIdleTaskHandleForCPU(1);
+    if (idle0) esp_task_wdt_delete(idle0);
+    if (idle1) esp_task_wdt_delete(idle1);
+    // Step 2: Deinit the TWDT entirely
+    esp_task_wdt_deinit();
+    Serial.println("[System] ⚠️  ALL Watchdog Timers DISABLED (IDLE0, IDLE1, TWDT)");
+    
+    // Initialize health monitor (calls TWDT init internally, so keep commented for now)
+    // g_healthMonitor.init(); 
+    Serial.println("[System] 🛡️  Health Monitor / Watchdog DISABLED per user request");
 
     Serial.println("\n========================================");
     Serial.printf("  ESP32 OCPP EVSE Controller - v%s\n", FIRMWARE_VERSION);
@@ -114,7 +137,7 @@ void setup()
 
 
     // Initialize health monitor FIRST
-    g_healthMonitor.init();
+    // g_healthMonitor.init(); // DISABLED: Testing GSM step-by-step
 
     // Initialize global variables and mutexes
     initGlobals();
@@ -173,10 +196,14 @@ void setup()
         Serial.println("[System] ✅ Transaction cleanup complete");
     }
 
-    // Record startup
-    Serial.printf("[System] Reboot count: %u\n", g_persistence.getRebootCount());
-    g_persistence.recordRebootCount();
-    
+    // Record startup - reset counter on clean power-on boot
+    if (reset_reason == ESP_RST_POWERON) {
+        g_persistence.resetRebootCount();
+        Serial.println("[System] 🔄 Power-on reset — reboot counter reset to 0");
+    } else {
+        Serial.printf("[System] Reboot count: %u\n", g_persistence.getRebootCount());
+        g_persistence.recordRebootCount();
+    }
     // *** DIAGNOSTIC: Log time between reboots ***
     static unsigned long lastLogged = 0;
     if (millis() - lastLogged > 5000 || lastLogged == 0) {
@@ -216,7 +243,7 @@ void setup()
     }
     else
     {
-        g_healthMonitor.addTaskToWatchdog(can1RxHandle, "CAN1_RX");
+        // g_healthMonitor.addTaskToWatchdog(can1RxHandle, "CAN1_RX"); // DISABLED per user request
     }
 
     // Create CAN2 RX task (BMS) - HIGH PRIORITY (priority 8)
@@ -236,7 +263,7 @@ void setup()
     }
     else
     {
-        g_healthMonitor.addTaskToWatchdog(can2RxHandle, "CAN2_RX");
+        // g_healthMonitor.addTaskToWatchdog(can2RxHandle, "CAN2_RX"); // DISABLED per user request
     }
 
     // Create charger communication task - HIGH PRIORITY (priority 7)
@@ -257,7 +284,7 @@ void setup()
     else
     {
         // SAFETY: Add to watchdog
-        g_healthMonitor.addTaskToWatchdog(chargerHandle, "CHARGER_COMM");
+        // g_healthMonitor.addTaskToWatchdog(chargerHandle, "CHARGER_COMM"); // DISABLED per user request
     }
 
     // FIX #3: Create OCPP task on Core 0 - MEDIUM PRIORITY (priority 3)
@@ -276,7 +303,7 @@ void setup()
     }
     else
     {
-        g_healthMonitor.addTaskToWatchdog(ocppTaskHandle, "OCPP_LOOP");
+        // g_healthMonitor.addTaskToWatchdog(ocppTaskHandle, "OCPP_LOOP"); // DISABLED per user request
     }
 
     // Create UI task for serial menu - LOWEST PRIORITY
@@ -304,10 +331,34 @@ void setup()
         Serial.println("[CRITICAL] Failed to create UI_TASK!");
     }
 
-    // Initialize WiFi with auto-reconnect (Credentials now managed internally by priority)
-    Serial.println("[System] 📡 Initializing Multi-WiFi Failover...");
-    g_wifiManager.begin(nullptr, nullptr); 
-    WiFi.setSleep(false); // Fix: Disable power save for stable WebSocket
+    // Initialize Network Manager (GSM primary, WiFi fallback)
+    Serial.println("[System] 📡 Initializing Network Manager (GSM → WiFi)...");
+    prod::g_networkManager.init();
+
+    // Create NETWORK_MGR task on Core 0 (priority 5)
+    static TaskHandle_t networkTaskHandle = nullptr;
+    BaseType_t netResult = xTaskCreatePinnedToCore(
+        [](void *arg) {
+            // Initial connection attempt
+            Serial.println("[NETWORK_MGR] Task started, beginning connection...");
+            while (true) {
+                prod::g_networkManager.poll();
+                // g_healthMonitor.feed(); // DISABLED
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        },
+        "NETWORK_MGR",
+        TASK_STACK_SIZE_NETWORK,
+        nullptr,
+        5,  // Priority 5 — between CAN (8) and OCPP (3)
+        &networkTaskHandle,
+        0); // Core 0
+
+    if (netResult != pdPASS) {
+        Serial.println("[CRITICAL] Failed to create NETWORK_MGR task!");
+    } else {
+        // g_healthMonitor.addTaskToWatchdog(networkTaskHandle, "NETWORK_MGR"); // DISABLED per user request
+    }
 
     // Initialize security (TLS/WSS)
     Serial.println("[System] 🔒 Initializing security...");
@@ -329,6 +380,9 @@ void setup()
     // This prevents the race condition that was causing crashes
     // Connector plug detection is configured in ocpp_manager.cpp
 
+    // Initialize hardware monitoring service (extracted from loop())
+    g_hardwareService.begin();
+
     // Initialize OCPP state machine
     g_ocppStateMachine.init();
 
@@ -341,595 +395,34 @@ void setup()
 
 void loop()
 {
+    // CRITICAL: Feed watchdog for loop task (runs on Core 1)
+    // g_healthMonitor.feed(); // DISABLED
+    // g_healthMonitor.poll(); // DISABLED
+
     // CRITICAL: Wait for OCPP initialization before accessing connector 1
     if (!ocppInitialized) {
-        g_wifiManager.poll();
-        g_healthMonitor.poll();
-        g_healthMonitor.feed();
         vTaskDelay(pdMS_TO_TICKS(100));
         return;
     }
     
-    // CRITICAL: Feed watchdog for loop task
-    g_healthMonitor.feed();
-    
-    // FIX #5: Keep loop() lightweight - OCPP runs in its own task now
-    // Poll WiFi (auto-reconnect if needed)
-    g_wifiManager.poll();
-
-    // Poll health monitor (check timeouts, etc.)
-    g_healthMonitor.poll();
-
-    // Poll OCPP state machine (deadlock prevention, timeout handling)
+    // Core services (lightweight polling)
     g_ocppStateMachine.poll();
 
-    // HYBRID PLUG DISCONNECT DETECTION (Option 4)
-    static unsigned long lastPlugCheck = 0;
-    static float lastVoltageCheck = 0.0f;
-    static unsigned long lastVoltageTime = 0;
-    static bool canRecoveryActive = false;  // Track CAN recovery state
-    
-    if (millis() - lastPlugCheck >= 500)
-    {
-        bool shouldDisconnect = false;
-        
-        // Method 1: BMS timeout (3 seconds) - Most reliable
-        if ((gunPhysicallyConnected || batteryConnected) && (millis() - lastBMS > 3000))
-        {
-            Serial.println("[PLUG] 🔌 Disconnected: BMS timeout (3s)");
-            shouldDisconnect = true;
-        }
-        
-        // Method 2: Zero current timeout - DISABLED (commented out)
-        /*
-        static unsigned long transactionStartTime = 0;
-        if (transactionActive && !chargingEnabled) {
-            transactionStartTime = millis();
-        }
-        
-        const unsigned long ZERO_CURRENT_GRACE_PERIOD = 30000;
-        bool gracePeriodExpired = (millis() - transactionStartTime) > ZERO_CURRENT_GRACE_PERIOD;
-        
-        if (transactionActive && chargingEnabled && gracePeriodExpired &&
-            terminalVolt > 56.0f && terminalCurr < 0.5f)
-        {
-            if (zeroCurrentStart == 0)
-            {
-                zeroCurrentStart = millis();
-            }
-            else if (millis() - zeroCurrentStart > 5000)
-            {
-                Serial.println("[PLUG] 🔌 Disconnected: Zero current during charging (5s)");
-                shouldDisconnect = true;
-            }
-        }
-        else
-        {
-            zeroCurrentStart = 0;
-        }
-        */
-        
-        // Method 3: Voltage drop rate (>2V/s) - DISABLED during CAN recovery
-        if (terminalVolt > 10.0f && !canRecoveryActive)
-        {
-            if (lastVoltageTime > 0)
-            {
-                float deltaV = lastVoltageCheck - terminalVolt;
-                float deltaT = (millis() - lastVoltageTime) / 1000.0f;
-                if (deltaT > 0.5f && (deltaV / deltaT) > 2.0f)
-                {
-                    Serial.printf("[PLUG] 🔌 Disconnected: Fast voltage drop (%.1fV/s)\n", deltaV / deltaT);
-                    shouldDisconnect = true;
-                }
-            }
-            lastVoltageCheck = terminalVolt;
-            lastVoltageTime = millis();
-        }
-        else
-        {
-            // Reset tracking when voltage too low or CAN recovery active
-            lastVoltageCheck = 0.0f;
-            lastVoltageTime = 0;
-        }
-        
-        // Check charger health to detect CAN recovery
-        bool chargerHealthy = isChargerModuleHealthy();
-        if (!chargerHealthy) {
-            canRecoveryActive = true;
-            Serial.println("[PLUG] ⚠️  CAN recovery active - voltage-drop disconnect disabled");
-        } else if (canRecoveryActive) {
-            canRecoveryActive = false;
-            Serial.println("[PLUG] ✅ CAN recovered - voltage-drop disconnect re-enabled");
-        }
-        
-        // Execute disconnect
-        if (shouldDisconnect && (gunPhysicallyConnected || batteryConnected))
-        {
-            gunPhysicallyConnected = false;
-            batteryConnected = false;
-            Serial.println("[PLUG] ✅ Status: DISCONNECTED");
-            
-            // Only stop transaction if one is actually running
-            if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
-                Serial.printf("[PLUG] 🛑 Stopping transaction due to EV disconnect (txId=%d)\n", activeTransactionId);
-                ocpp::endTransactionSafe(nullptr, "EVDisconnected");
-            } else {
-                Serial.println("[PLUG] ℹ️  No active transaction - just updating status to Available");
-            }
-        }
-        
-        lastPlugCheck = millis();
-    }
+    // ═══════════════════════════════════════════════════════════
+    // All hardware monitoring delegated to HardwareService
+    // (Plug detection, Safety, Energy, Charger health, VehicleInfo)
+    // ═══════════════════════════════════════════════════════════
+    g_hardwareService.poll();
 
-    // Monitor plug connection state changes
-    static bool lastPlugState = false;
-    bool currentPlugState = (gunPhysicallyConnected && batteryConnected);
-    
-    if (currentPlugState != lastPlugState)
-    {
-        if (currentPlugState)
-        {
-            Serial.println("[PLUG] 🔌 Gun plugged, vehicle detected");
-        }
-        lastPlugState = currentPlugState;
-    }
-    
-    // Send VehicleInfo for pay-and-charge: User needs vehicle data BEFORE RemoteStart
-    // to calculate charging cost and choose charging options
-    static unsigned long lastVehicleInfoSent = 0;
-    static bool firstSendDone = false;
-    static unsigned long lastChargerStatusSent = 0;
-    
-    // Send when EV connected in Preparing state (waiting for user to start charging)
-    // Stop when transaction starts (actually moving to Running/Charging state)
-    bool shouldSendVehicleInfo = (
-        batteryConnected && 
-        gunPhysicallyConnected && 
-        !ocpp::isTransactionRunningSafe(1) && 
-        BMS_Imax > 0.0f && 
-        terminalVolt > 56.0f &&
-        socPercent > 0.0f
-    );
-
-    // DIAGNOSTIC for Pay-and-Charge data
-    static unsigned long lastVehicleDiag = 0;
-    if (millis() - lastVehicleDiag > 10000 && gunPhysicallyConnected) {
-        lastVehicleDiag = millis();
-        Serial.printf("[VEHICLE_DIAG] shouldSend=%d (batt=%d gun=%d !running=%d Imax=%.1f V=%.1f SOC=%.1f)\n",
-                      shouldSendVehicleInfo, batteryConnected, gunPhysicallyConnected, 
-                      !ocpp::isTransactionRunningSafe(1), BMS_Imax, terminalVolt, socPercent);
-    }
-    
-    if (shouldSendVehicleInfo)
-    {
-        // PRODUCTION: Send once immediately on plug-in, then every 5min OR on >1% SOC change
-        static float lastSentSoc = -1.0f;
-        bool socChanged = (lastSentSoc >= 0.0f && fabsf(socPercent - lastSentSoc) >= 1.0f);
-        unsigned long interval = firstSendDone ? 300000 : 3000;  // 5min (was 15s) or 3s for first
-        
-        if (millis() - lastVehicleInfoSent >= interval || socChanged)
-        {
-            ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);
-            lastVehicleInfoSent = millis();
-            lastSentSoc = socPercent;
-            firstSendDone = true;
-        }
-        
-        // Send ChargerStatus ONLY when there's a blocking issue
-        if (millis() - lastChargerStatusSent >= 5000)
-        {
-            bool chargerHealthy = isChargerModuleHealthy();
-            bool wifiConnected = g_wifiManager.isConnected();
-            bool tempOk = (chargerTemp < ALERT_TEMP_CRITICAL_C);
-            bool voltageOk = (terminalVolt >= MIN_VOLTAGE_V && terminalVolt <= MAX_VOLTAGE_V);
-            
-            // ONLY send if there's a problem
-            if (!chargerHealthy) {
-                ocpp::sendChargerStatus(false, "Charger module offline - check CAN bus connection");
-                lastChargerStatusSent = millis();
-            } else if (!wifiConnected) {
-                ocpp::sendChargerStatus(false, "WiFi disconnected - check network connection");
-                lastChargerStatusSent = millis();
-            } else if (!bmsSafeToCharge) {
-                ocpp::sendChargerStatus(false, "BMS charging disabled - vehicle not ready");
-                lastChargerStatusSent = millis();
-            } else if (!tempOk) {
-                char msg[64];
-                snprintf(msg, sizeof(msg), "Temperature too high: %.1f°C", chargerTemp);
-                ocpp::sendChargerStatus(false, msg);
-                lastChargerStatusSent = millis();
-            } else if (!voltageOk) {
-                char msg[64];
-                snprintf(msg, sizeof(msg), "Voltage out of range: %.1fV", terminalVolt);
-                ocpp::sendChargerStatus(false, msg);
-                lastChargerStatusSent = millis();
-            }
-            // If everything is OK, don't send anything
-        }
-    }
-    else
-    {
-        // Reset when conditions not met
-        if (transactionActive || ocpp::isTransactionRunningSafe(1) || !batteryConnected) {
-            lastVehicleInfoSent = 0;
-            firstSendDone = false;
-            lastChargerStatusSent = 0;
-        }
-    }
-
-    // SAFETY: Monitor BMS charging permission (100ms check)
-    static bool lastBmsSafeToCharge = false;
-    static unsigned long lastBmsSafetyCheck = 0;
-    
-    if (millis() - lastBmsSafetyCheck >= 100)
-    {
-        if (bmsSafeToCharge != lastBmsSafeToCharge)
-        {
-            if (!bmsSafeToCharge)
-            {
-                Serial.println("\n╔═══════════════════════════════════════════════════════════════╗");
-                Serial.println("║  🚨 EMERGENCY STOP TRIGGERED - BMS SAFETY CHECK FAILED 🚨    ║");
-                Serial.println("╚═══════════════════════════════════════════════════════════════╝");
-                Serial.printf("[SAFETY] ⏱️  Timestamp: %lu ms since boot\n", millis());
-                Serial.printf("[SAFETY] 🔍 BMS State: bmsSafeToCharge=%d (was %d)\n", bmsSafeToCharge, lastBmsSafeToCharge);
-                Serial.printf("[SAFETY] 🔍 BMS Timeout: lastBMS=%lu ms ago\n", millis() - lastBMS);
-                Serial.printf("[SAFETY] 🔍 Battery: connected=%d voltage=%.1fV current=%.1fA\n", batteryConnected, terminalVolt, terminalCurr);
-                Serial.printf("[SAFETY] 🔍 Transaction: active=%d running=%d txId=%d\n", transactionActive, ocpp::isTransactionRunningSafe(1), activeTransactionId);
-                Serial.printf("[SAFETY] 🔍 Charging: enabled=%d ocppPermits=%d\n", chargingEnabled, ocpp::ocppPermitsChargeSafe(1));
-                
-                if (transactionActive && ocpp::isTransactionRunningSafe(1))
-                {
-                    Serial.printf("[SAFETY] 🚨 EMERGENCY STOP - Ending transaction (txId=%d)\n", activeTransactionId);
-                    Serial.println("[SAFETY] 📋 Reason: BMS safety flag changed during active charging");
-                    
-                    // Set fault lock to prevent immediate restart
-                    faultLockActive = true;
-                    faultLockTime = millis();
-                    Serial.println("[SAFETY] 🔒 Fault lock activated - 10s stabilization required");
-                    
-                    ocpp::sendBMSAlert("BMS_EMERGENCY_STOP", "BMS disabled charging during transaction");
-                    ocpp::endTransactionSafe(nullptr, "EmergencyStop");
-                    Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
-                }
-                else
-                {
-                    Serial.println("[SAFETY] ℹ️  No active transaction - just logging BMS state change");
-                    ocpp::sendBMSAlert("BMS_CHARGING_DISABLED", "BMS not ready for charging");
-                    Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
-                }
-            }
-            else
-            {
-                Serial.println("[SAFETY] ✅ BMS charging enabled");
-                ocpp::sendBMSAlert("BMS_CHARGING_ENABLED", "BMS ready for charging");
-            }
-            lastBmsSafeToCharge = bmsSafeToCharge;
-        }
-        
-        lastBmsSafetyCheck = millis();
-    }
-
-    // Accumulate energy when charging - use terminal values with validation
-    static unsigned long lastEnergyTime = millis();
-    static unsigned long lastChargerHealthCheck = 0;
-    
-    if (millis() - lastChargerHealthCheck >= 2000)
-    {
-        bool chargerHealthy = isChargerModuleHealthy();
-        static bool lastChargerHealthy = false;
-        static bool firstCheck = true;
-        
-        // Detect health state change (skip logging on first check)
-        if (!firstCheck && chargerHealthy != lastChargerHealthy)
-        {
-            if (!chargerHealthy)
-            {
-                Serial.println("\n[CHARGER] ❌ CRITICAL: Charger module communication lost!");
-                Serial.println("[CHARGER] ⚠️  Possible causes:");
-                Serial.println("[CHARGER]    - Charger PCB powered OFF");
-                Serial.println("[CHARGER]    - CAN bus disconnected");
-                Serial.println("[CHARGER]    - Hardware fault");
-                Serial.printf("[CHARGER] 🔍 Last messages: TermPower=%lums TermStatus=%lums Heartbeat=%lums ago\n",
-                             millis() - lastTerminalPower,
-                             millis() - lastTerminalStatus,
-                             millis() - lastHeartbeat);
-                
-                // Send alert to server
-                ocpp::sendSystemAlert("CHARGER_OFFLINE", "CAN communication timeout", "Critical");
-                
-                Serial.println("[OCPP] 🚨 Forcing connector to Unavailable");
-                // MicroOcpp will automatically update based on setEvseReadyInput
-            }
-            else
-            {
-                Serial.println("\n[CHARGER] ✅ Charger module communication restored!");
-                Serial.println("[OCPP] ✅ Connector now Available");
-                
-                // Send recovery alert
-                ocpp::sendSystemAlert("CHARGER_ONLINE", "CAN communication restored", "Info");
-            }
-            
-            lastChargerHealthy = chargerHealthy;
-        }
-        
-        if (firstCheck)
-        {
-            lastChargerHealthy = chargerHealthy;
-            firstCheck = false;
-        }
-        
-        // If charging enabled but charger offline, stop transaction
-        if (chargingEnabled && !chargerHealthy)
-        {
-            if (transactionActive && ocpp::isTransactionRunningSafe(1))
-            {
-                Serial.printf("[CHARGER] 🚨 SAFETY: Charger offline during transaction (txId=%d)\n", activeTransactionId);
-                Serial.println("[CHARGER] 🔍 Check: CAN bus, charger power, hardware connection");
-                ocpp::endTransactionSafe(nullptr, "Other", 1);  // Use "Other" instead of "EVSEFailure"
-            }
-        }
-        
-        lastChargerHealthCheck = millis();
-    }
-    
-    // FINAL FIX: HARD GATE without txId check
-    // Golden Rule: OCPP authorization comes from StartTransaction acceptance, NOT txId
-    bool ocppAllows = ocpp::ocppPermitsChargeSafe(1);
-    bool canCharge = (
-        ocppAllows &&           // OCPP must permit FIRST
-        transactionActive &&    // Transaction started
-        chargingEnabled         // Hardware enabled by OCPP callback
-    );
-    
-    // Only accumulate energy if HARD GATE is open AND hardware conditions valid
-    if (canCharge && 
-        terminalVolt > 56.0f && terminalVolt < 85.5f && 
-        terminalCurr > 0.0f && terminalCurr < 300.0f)
-    {
-        unsigned long now = millis();
-        float dt_hours = (now - lastEnergyTime) / 3600000.0f;
-        float energyDelta = terminalVolt * terminalCurr * dt_hours;
-        
-        // Only add positive energy increments with mutex protection
-        if (energyDelta > 0.0f && energyDelta < 1000.0f) {
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                energyWh += energyDelta;
-                xSemaphoreGive(dataMutex);
-            }
-        }
-        lastEnergyTime = now;
-    }
-    else
-    {
-        lastEnergyTime = millis();
-    }
-
-    // Debug output every 10 seconds - display terminal values
-    static unsigned long lastDebug = 0;
-    if (millis() - lastDebug >= 10000)
-    {
-        // Check OCPP connection and transaction status
-        /*
-        bool ocppConnected = ocpp::isConnected();
-        bool txActive = ocpp::isTransactionActiveSafe(1);  // Preparing or running
-        bool txRunning = ocpp::isTransactionRunningSafe(1);  // Actively running
-        bool chargerHealthy = isChargerModuleHealthy();
-        bool ocppPermits = ocpp::ocppPermitsChargeSafe(1);
-        */
-        
-        // [DISABLED] Periodic status logging - removed for cleaner console
-        // const char* currentState = g_ocppStateMachine.getStateName();
-        // Serial.printf("[DIAGNOSTIC] 🔍 State Machine Status: %s | TX_Active=%d | TX_Running=%d\n", 
-        //              currentState, txActive, txRunning);
-        // Serial.printf("\n[Status] Uptime: %us | WiFi: %s | OCPP: %s | State: %s\n",
-        //               g_healthMonitor.getUptimeSeconds(),
-        //               g_wifiManager.isConnected() ? "✅" : "❌",
-        //               ocppConnected ? "Connected" : "Disconnected",
-        //               currentState);
-        // Serial.printf("[Metrics] V=%.1fV I=%.1fA SOC=%.1f%% Range=%.1fkm Temp=%.1f°C Energy=%.2fWh (meter=%d)\n",
-        //               terminalVolt, terminalCurr, socPercent, rangeKm, chargerTemp, energyWh, (int)energyWh);
-        // 
-        // const char* modelName = "Unknown";
-        // if (vehicleModel == 1) modelName = "Classic";
-        // else if (vehicleModel == 2) modelName = "Pro";
-        // else if (vehicleModel == 3) modelName = "Max";
-        // 
-        // Serial.printf("[Vehicle] Model=%s | Capacity=%.0fAh | BMS_Imax=%.1fA\n",
-        //               modelName, batteryAh, BMS_Imax);
-        // Serial.printf("[Charger] Module=%s | Enabled=%s | TX=%s/%s | Current=%s | OCPP=%s\n",
-        //               chargerHealthy ? "ONLINE" : "OFFLINE",
-        //               chargingEnabled ? "YES" : "NO",
-        //               txActive ? "ACTIVE" : "IDLE",
-        //               txRunning ? "RUNNING" : "STOPPED",
-        //               (terminalCurr > 1.0f) ? "FLOWING" : "ZERO",
-        //               ocppPermits ? "PERMITS" : "BLOCKS");
-        lastDebug = millis();
-    }
-
-    // WiFi connection monitoring
-    static bool lastWifiConnected = true;
-    bool wifiConnected = g_wifiManager.isConnected();
-    
-    if (wifiConnected != lastWifiConnected) {
-        if (!wifiConnected) {
-            Serial.println("[WIFI] ❌ Network connection lost!");
-            ocpp::sendSystemAlert("WIFI_DISCONNECTED", "Network connection lost", "Critical");
-        } else {
-            Serial.println("[WIFI] ✅ Network connection restored!");
-            ocpp::sendSystemAlert("WIFI_RECONNECTED", "Network connection restored", "Info");
-        }
-        lastWifiConnected = wifiConnected;
-    }
-    
-    // Temperature monitoring
-    static bool tempWarningActive = false;
-    static bool tempCriticalActive = false;
-    
-    // FAULT LOCK AUTO-RECOVERY: Clear fault lock after stabilization period if conditions are safe
-    if (faultLockActive && (millis() - faultLockTime) >= FAULT_STABILIZATION_PERIOD_MS) {
-        bool conditionsSafe = (
-            bmsSafeToCharge &&
-            terminalVolt >= ALERT_VOLTAGE_MIN_V && terminalVolt <= ALERT_VOLTAGE_MAX_V &&
-            chargerTemp <= ALERT_TEMP_CRITICAL_C &&
-            terminalCurr <= ALERT_CURRENT_MAX_A
-        );
-        
-        if (conditionsSafe) {
-            Serial.println("[FAULT] ✅ Stabilization complete - conditions safe, clearing fault lock");
-            faultLockActive = false;
-        } else {
-            Serial.println("[FAULT] ⚠️  Stabilization period expired but conditions still unsafe - extending lock");
-            faultLockTime = millis(); // Extend lock
-        }
-    }
-    
-    if (chargerTemp > ALERT_TEMP_CRITICAL_C && !tempCriticalActive) {
-        Serial.printf("[TEMP] 🚨 CRITICAL: Temperature %.1f°C (limit: %.0f°C)\n", chargerTemp, ALERT_TEMP_CRITICAL_C);
-        
-        // SAFETY: Immediately stop charger hardware
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            chargingEnabled = false;
-            xSemaphoreGive(dataMutex);
-        }
-        sendImmediateChargerStop();
-        
-        char msg[64];
-        snprintf(msg, sizeof(msg), "Temperature: %.1f°C", chargerTemp);
-        ocpp::sendSystemAlert("TEMPERATURE_CRITICAL", msg, "Critical");
-        
-        // Stop transaction if active
-        if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
-            Serial.printf("[TEMP] 🛑 Stopping transaction due to overheat (txId=%d)\n", activeTransactionId);
-            
-            // Set fault lock
-            faultLockActive = true;
-            faultLockTime = millis();
-            Serial.println("[TEMP] 🔒 Fault lock activated - 10s stabilization required");
-            
-            ocpp::endTransactionSafe(nullptr, "EmergencyStop");
-        }
-        
-        tempCriticalActive = true;
-        tempWarningActive = true;
-    } else if (chargerTemp > ALERT_TEMP_WARNING_C && !tempWarningActive) {
-        Serial.printf("[TEMP] ⚠️  WARNING: Temperature %.1f°C (limit: %.0f°C)\n", chargerTemp, ALERT_TEMP_WARNING_C);
-        char msg[64];
-        snprintf(msg, sizeof(msg), "Temperature: %.1f°C", chargerTemp);
-        ocpp::sendSystemAlert("TEMPERATURE_WARNING", msg, "Warning");
-        tempWarningActive = true;
-    } else if (chargerTemp < (ALERT_TEMP_WARNING_C - 5.0f) && tempWarningActive) {
-        Serial.printf("[TEMP] ✅ Temperature normal: %.1f°C\n", chargerTemp);
-        ocpp::sendSystemAlert("TEMPERATURE_NORMAL", "Temperature recovered", "Info");
-        tempWarningActive = false;
-        tempCriticalActive = false;
-    }
-    
-    // Voltage monitoring
-    static bool voltageAlertActive = false;
-    
-    if (terminalVolt > 0.0f && batteryConnected) {
-        if ((terminalVolt > ALERT_VOLTAGE_MAX_V || terminalVolt < ALERT_VOLTAGE_MIN_V) && !voltageAlertActive) {
-            Serial.printf("[VOLTAGE] 🚨 Out of range: %.1fV (range: %.0f-%.0fV)\n", 
-                terminalVolt, ALERT_VOLTAGE_MIN_V, ALERT_VOLTAGE_MAX_V);
-            
-            // SAFETY: Immediately stop charger hardware
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                chargingEnabled = false;
-                xSemaphoreGive(dataMutex);
-            }
-            sendImmediateChargerStop();
-            
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Voltage: %.1fV", terminalVolt);
-            ocpp::sendSystemAlert("VOLTAGE_FAULT", msg, "Critical");
-            
-            // Stop transaction if active
-            if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
-                Serial.printf("[VOLTAGE] 🛑 Stopping transaction due to voltage fault (txId=%d)\n", activeTransactionId);
-                
-                // Set fault lock
-                faultLockActive = true;
-                faultLockTime = millis();
-                Serial.println("[VOLTAGE] 🔒 Fault lock activated - 10s stabilization required");
-                
-                ocpp::endTransactionSafe(nullptr, "EmergencyStop");
-            }
-            
-            voltageAlertActive = true;
-        } else if (terminalVolt >= MIN_VOLTAGE_V && terminalVolt <= MAX_VOLTAGE_V && voltageAlertActive) {
-            Serial.printf("[VOLTAGE] ✅ Normal: %.1fV\n", terminalVolt);
-            ocpp::sendSystemAlert("VOLTAGE_NORMAL", "Voltage recovered", "Info");
-            voltageAlertActive = false;
-        }
-    }
-    
-    // Current monitoring
-    static bool currentAlertActive = false;
-    
-    if (terminalCurr > ALERT_CURRENT_MAX_A && !currentAlertActive) {
-        Serial.printf("[CURRENT] 🚨 Overcurrent: %.1fA (limit: %.0fA)\n", terminalCurr, ALERT_CURRENT_MAX_A);
-        
-        // SAFETY: Immediately stop charger hardware
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            chargingEnabled = false;
-            xSemaphoreGive(dataMutex);
-        }
-        sendImmediateChargerStop();
-        
-        char msg[64];
-        snprintf(msg, sizeof(msg), "Current: %.1fA", terminalCurr);
-        ocpp::sendSystemAlert("OVERCURRENT", msg, "Critical");
-        
-        // Stop transaction if active
-        if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
-            Serial.printf("[CURRENT] 🛑 Stopping transaction due to overcurrent (txId=%d)\n", activeTransactionId);
-            
-            // Set fault lock
-            faultLockActive = true;
-            faultLockTime = millis();
-            Serial.println("[CURRENT] 🔒 Fault lock activated - 10s stabilization required");
-            
-            ocpp::endTransactionSafe(nullptr, "EmergencyStop");
-        }
-        
-        currentAlertActive = true;
-    } else if (terminalCurr < MAX_CURRENT_A && currentAlertActive) {
-        Serial.printf("[CURRENT] ✅ Normal: %.1fA\n", terminalCurr);
-        ocpp::sendSystemAlert("CURRENT_NORMAL", "Current recovered", "Info");
-        currentAlertActive = false;
-    }
-
-    // POST-TRANSACTION VehicleInfo: Send every 30s after charging stops until gun unplugged
-    // FIX3: Added sessionEverCompleted gate — prevents sending Energy=0.00Wh at boot
-    static unsigned long lastPostTxVehicleInfo = 0;
-    static bool sessionEverCompleted = false;
-
-    // Mark session as completed when a real StopTransaction is processed
-    if (txStopTime > 0 && !transactionActive) {
-        sessionEverCompleted = true;
-    }
-
-    bool shouldSendPostTxVehicleInfo = (
-        sessionEverCompleted &&   // FIX3: Only after a real session has ended
-        !transactionActive &&
-        !ocpp::isTransactionRunningSafe(1) &&
-        gunPhysicallyConnected &&
-        batteryConnected &&
-        terminalVolt > 56.0f &&
-        BMS_Imax > 0.0f &&
-        socPercent > 0.0f
-    );
-    
-    if (shouldSendPostTxVehicleInfo) {
-        // PRODUCTION: Increased Post-Tx interval to 300s (5min, was 30s) to reduce queue pressure
-        if (millis() - lastPostTxVehicleInfo >= 300000) {
-            Serial.printf("[OCPP] 📊 Sending Post-Tx VehicleInfo: SOC=%.1f%% Energy=%.2fWh\n", 
-                         socPercent, energyWh);
-            ocpp::sendVehicleInfo(socPercent, BMS_Imax, terminalVolt, terminalCurr, chargerTemp, vehicleModel, rangeKm);
-            lastPostTxVehicleInfo = millis();
-        }
-    } else {
-        lastPostTxVehicleInfo = 0;
+    // ═══════════════════════════════════════════════════════════
+    // Heartbeat / Autonomous Boot Indicator
+    // ═══════════════════════════════════════════════════════════
+    static unsigned long lastHeartbeatBlink = 0;
+    static bool heartbeatState = false;
+    if (millis() - lastHeartbeatBlink > 500) {
+        heartbeatState = !heartbeatState;
+        digitalWrite(LED_WIFI, heartbeatState);
+        lastHeartbeatBlink = millis();
     }
 
     // FIX #5: Yield to prevent watchdog timeout

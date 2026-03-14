@@ -19,13 +19,22 @@ static volatile uint16_t rxTail = 0;
 static CanMcp2515Status driverStatus = {false, false, 0, 0, 0, 0};
 static SemaphoreHandle_t mcp2515RecoveryMutex = nullptr;
 
-// ISR flag
+// ISR and Task handle
+static TaskHandle_t can2TaskHandle = nullptr;
 static volatile bool messageAvailable = false;
 
-// ISR handler
-void IRAM_ATTR mcp2515_isr()
+// ISR triggered by MCP2515 INT pin
+static void IRAM_ATTR mcp2515_isr()
 {
-    messageAvailable = true;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (can2TaskHandle != nullptr)
+    {
+        vTaskNotifyGiveFromISR(can2TaskHandle, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken)
+        {
+            portYIELD_FROM_ISR();
+        }
+    }
 }
 
 namespace CAN_MCP2515
@@ -42,40 +51,29 @@ namespace CAN_MCP2515
 
         if (mcp2515RecoveryMutex && xSemaphoreTake(mcp2515RecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
-            // Initialize SPI
-            Serial.println("[CAN2] Starting SPI bus...");
+            // Initialize SPI explicitly with hardware pins to avoid conflicts
+            Serial.printf("[CAN2] Starting SPI bus (SCK:%d, MISO:%d, MOSI:%d, CS:%d)...\n", 
+                CAN2_SCK_PIN, CAN2_MISO_PIN, CAN2_MOSI_PIN, CAN2_CS_PIN);
             
-            // Pulse CS pin high then low to reset MCP2515 SPI interface
-            pinMode(CAN2_CS_PIN, OUTPUT);
-            digitalWrite(CAN2_CS_PIN, HIGH);
-            delay(10);
-            digitalWrite(CAN2_CS_PIN, LOW);
-            delay(10);
-            digitalWrite(CAN2_CS_PIN, HIGH);
-            delay(50);
+            SPI.begin(CAN2_SCK_PIN, CAN2_MISO_PIN, CAN2_MOSI_PIN, CAN2_CS_PIN); 
+            delay(100); 
 
-            SPI.end(); // Ensure clean state
-            delay(20);
-            SPI.begin(CAN2_SCK_PIN, CAN2_MISO_PIN, CAN2_MOSI_PIN, -1); 
-            delay(50);
-            
-            // EXTREME DIAGNOSTIC: Manual SPI read (Optimized to 10MHz)
-            Serial.println("[CAN2] 🧪 Manual SPI test (Read CANSTAT 0x0E at 10MHz)...");
-            SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
+            // DIAGNOSTIC: Manual SPI read to verify chip presence
+            Serial.println("[CAN2] 🧪 Manual SPI test (Read CANSTAT 0x0E at 1MHz)...");
+            SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
             digitalWrite(CAN2_CS_PIN, LOW);
             SPI.transfer(0x03); // READ command
             SPI.transfer(0x0E); // CANSTAT address
             uint8_t stat = SPI.transfer(0x00);
             digitalWrite(CAN2_CS_PIN, HIGH);
             SPI.endTransaction();
-            Serial.printf("[CAN2] 🧪 Manual SPI result: 0x%02X (Expected default ~0x80 or 0x00)\n", stat);
-
-            // Create MCP2515 instance
+            Serial.printf("[CAN2] 🧪 Manual SPI result: 0x%02X (Expected ~0x80 or 0x00)\n", stat);
+            
+            // Create MCP2515 instance with 2MHz SPI clock to reduce EMI susceptibility (was 10MHz)
             if (mcp2515 == nullptr)
             {
-                mcp2515 = new MCP2515(CAN2_CS_PIN);
+                mcp2515 = new MCP2515(CAN2_CS_PIN, 2000000);
             }
-
             // CRITICAL: Hardware reset first
             Serial.println("[CAN2] Resetting MCP2515...");
             MCP2515::ERROR result = mcp2515->reset();
@@ -94,14 +92,13 @@ namespace CAN_MCP2515
                 Serial.printf("[CAN2] ❌ Reset failed again: %d\n", result);
                 
                 // DIAGNOSTIC EXTRAS:
-                Serial.println("[CAN2] 🔍 Checking SPI health...");
-                uint8_t flags = mcp2515->getErrorFlags();
-                if (flags == 0xFF) {
-                    Serial.println("[CAN2] ❌ SPI Error: Received 0xFF (likely MISO pin HIGH issue)");
-                } else if (flags == 0x00 && stat == 0x00) {
-                    Serial.println("[CAN2] ❌ SPI Error: Received 0x00 consistently (MISO pin LOW or no power)");
+                Serial.println("[CAN2] 🔍 SPI Health Check:");
+                if (stat == 0xFF) {
+                    Serial.println("[CAN2] ❌ SPI Error: Received 0xFF (MISO pin stuck HIGH - check wiring/power)");
+                } else if (stat == 0x00) {
+                    Serial.println("[CAN2] ❌ SPI Error: Received 0x00 (MISO pin stuck LOW - check wiring/CS/SCK)");
                 } else {
-                    Serial.printf("[CAN2] 📊 Register check: 0x%02X, Manual: 0x%02X\n", flags, stat);
+                    Serial.printf("[CAN2] 📊 SPI responded with 0x%02X, but library reset failed.\n", stat);
                 }
 
                 Serial.println("[CAN2] ⚠️  Possible causes:");
@@ -115,6 +112,7 @@ namespace CAN_MCP2515
             delay(50); // Chip stabilization 
 
             // Set bitrate (CRITICAL: 8MHz crystal)
+            // Note: Library constants for 8MHz/250k have been patched in mcp2515.h for 81.25% sample point
             result = mcp2515->setBitrate(CAN_250KBPS, MCP_8MHZ);
             if (result != MCP2515::ERROR_OK)
             {
@@ -157,8 +155,9 @@ namespace CAN_MCP2515
                 return false;
             }
 
-            // Setup interrupt
-            pinMode(CAN2_INT_PIN, INPUT_PULLUP);
+            // Setup interrupt (ENABLED: Lower latency RX)
+            Serial.printf("[CAN2] 🗳️  Interrupt Mode Active (GPIO %d)\n", CAN2_INT_PIN);
+            pinMode(CAN2_INT_PIN, INPUT); // GPIO 34 is input-only
             attachInterrupt(digitalPinToInterrupt(CAN2_INT_PIN), mcp2515_isr, FALLING);
 
             driverStatus.is_initialized = true;
@@ -176,7 +175,9 @@ namespace CAN_MCP2515
     {
         if (mcp2515)
         {
-            detachInterrupt(digitalPinToInterrupt(CAN2_INT_PIN));
+            if (CAN2_INT_PIN >= 0) {
+                detachInterrupt(digitalPinToInterrupt(CAN2_INT_PIN));
+            }
             delete mcp2515;
             mcp2515 = nullptr;
         }
@@ -339,9 +340,16 @@ namespace CAN_MCP2515
 // CAN2 RX Task (BMS messages)
 void can2_rx_task(void *arg)
 {
+    can2TaskHandle = xTaskGetCurrentTaskHandle();
     Serial.println("[CAN2] RX task started");
 
     struct can_frame frame;
+    
+    // Boot monitor: track REC/TEC every 5s for first 60s
+    unsigned long bootStart = millis();
+    unsigned long lastBootLog = 0;
+    uint8_t prevRec = 0, prevTec = 0;
+    bool bootMonitorDone = false;
 
     while (true)
     {
@@ -350,11 +358,40 @@ void can2_rx_task(void *arg)
         {
             if (driverStatus.is_initialized && driverStatus.is_active)
             {
-                // Check interrupt flag
-                // Active LOW: messageAvailable flag OR digitalRead directly
-                while (messageAvailable || !digitalRead(CAN2_INT_PIN))
+                // ── Boot Monitor: Log REC/TEC every 5s for first 60s ──
+                if (!bootMonitorDone)
                 {
-                    messageAvailable = false;
+                    unsigned long elapsed = millis() - bootStart;
+                    if (elapsed > 60000)
+                    {
+                        bootMonitorDone = true;
+                        Serial.println("[CAN2] 📊 Boot monitor complete (60s)");
+                    }
+                    else if (millis() - lastBootLog >= 5000)
+                    {
+                        uint8_t rec = mcp2515->errorCountRX();
+                        uint8_t tec = mcp2515->errorCountTX();
+                        uint8_t eflg = mcp2515->getErrorFlags();
+                        Serial.printf("[CAN2] 📊 Boot +%us | REC:%u TEC:%u EFLG:0x%02X | RX:%u TX:%u\n",
+                            (uint32_t)(elapsed / 1000), rec, tec, eflg,
+                            (uint32_t)driverStatus.total_rx_messages, (uint32_t)driverStatus.total_tx_messages);
+                        
+                        // Flag large jumps
+                        if (rec > prevRec + 10)
+                            Serial.printf("[CAN2] ⚠️  REC jumped +%d (noise or bitrate mismatch?)\n", rec - prevRec);
+                        
+                        prevRec = rec;
+                        prevTec = tec;
+                        lastBootLog = millis();
+                    }
+                }
+
+                // Check for new messages via SPI polling (Limited to 10 per cycle)
+                // readMessage will return ERROR_OK if data exists in MCP2515 buffers
+                int processed = 0;
+                while (processed < 10)
+                {
+                    messageAvailable = false; // Reset flag just in case
 
                     MCP2515::ERROR result = mcp2515->readMessage(&frame);
                     if (result != MCP2515::ERROR_OK)
@@ -363,6 +400,7 @@ void can2_rx_task(void *arg)
                     }
 
                     // SUCCESS: Received a message
+                    processed++;
                     uint32_t rxId = frame.can_id & CAN_EFF_MASK;
                     
                     // Strict software filter: Ignore anything besides the two required IDs
@@ -428,7 +466,9 @@ void can2_rx_task(void *arg)
             xSemaphoreGive(mcp2515RecoveryMutex);
         }
 
-        prod::g_healthMonitor.feed();
-        vTaskDelay(pdMS_TO_TICKS(5));
+        // prod::g_healthMonitor.feed(); // DISABLED for testing
+        
+        // Wait for interrupt notification with 100ms timeout (failsafe polling)
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
     }
 }

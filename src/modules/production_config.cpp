@@ -1,4 +1,5 @@
 #include "../include/production_config.h"
+#include "../include/utils/safe_string.h"
 #include <Arduino.h>
 
 namespace prod
@@ -76,10 +77,9 @@ namespace prod
             return false;
         }
 
-        strncpy(transactionId, txnId.c_str(), idLen - 1);
-        transactionId[idLen - 1] = '\0';
-        strncpy(idTag, tag.c_str(), idLen - 1);
-        idTag[idLen - 1] = '\0';
+        // FIX: Use safe string copy to prevent buffer overflow
+        SafeString::copy(transactionId, txnId.c_str(), idLen);
+        SafeString::copy(idTag, tag.c_str(), idLen);
 
         Serial.printf("[PERSIST] Restored transaction: %s\n", transactionId);
         return true;
@@ -125,6 +125,16 @@ namespace prod
             return 0;
         }
         return prefs.getUInt("rebootCount", 0);
+    }
+
+    void PersistenceManager::resetRebootCount()
+    {
+        if (!ensureInit())
+        {
+            return;
+        }
+        prefs.putUInt("rebootCount", 0);
+        Serial.println("[PERSIST] ✅ Reboot counter reset to 0");
     }
 
     void PersistenceManager::recordLastError(const char *error)
@@ -200,8 +210,8 @@ namespace prod
         }
 
         String h = prefs.getString("centralHost", "");
-        strncpy(host, h.c_str(), hostLen - 1);
-        host[hostLen - 1] = '\0';
+        // FIX: Use safe string copy
+        SafeString::copy(host, h.c_str(), hostLen);
         port = prefs.getUShort("centralPort", 8080);
         return true;
     }

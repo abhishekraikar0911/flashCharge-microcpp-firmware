@@ -120,18 +120,15 @@ namespace prod
                 
                 if (batteryConnected)
                 {
-                    // Battery connected → Transition to PREPARING
+                    // Battery connected → Transition to PREPARING (only from Available)
+                    // IMPORTANT: Do NOT override Finishing, Charging, or SuspendedEV/EVSE states.
+                    // Finishing must remain until the gun is physically disconnected (OCPP 1.6 spec).
                     if (currentState == ConnectorState::Available)
                     {
                         Serial.println("[OCPP_SM] 🔋 Battery connected - Transitioning to PREPARING state");
                         forceState(ConnectorState::Preparing);
                     }
-                    else if (currentState == ConnectorState::Finishing)
-                    {
-                        Serial.println("[OCPP_SM] 🔋 Battery connected (was in Finishing) - Transitioning to PREPARING");
-                        forceState(ConnectorState::Preparing);
-                        g_persistence.clearTransaction();
-                    }
+                    // Finishing state is "sticky" — stay here until gun is removed
                 }
                 else
                 {
@@ -353,24 +350,32 @@ namespace prod
 
     bool OCPPStateMachine::isPlugConnected()
     {
-        // CRITICAL: Detect vehicle connection via terminal voltage
-        // When vehicle connects, terminal voltage appears (56-99V range)
-        // terminalVolt is declared in header.h as global extern
+        // CRITICAL FIX: Detect vehicle connection reliably.
+        // Previously we checked if terminalVolt is between 56-99V. However, 
+        // when the charger is in Available state, the power contactors are OPEN, 
+        // so terminalVolt is 0.0V. We must rely on the BMS communication flags 
+        // (gunPhysicallyConnected or batteryConnected) which are set as soon as 
+        // the BMS CAN bus responds.
         
-        // Vehicle is connected if terminal voltage is in valid range
-        bool voltageDetected = (::terminalVolt >= 56.0f && ::terminalVolt <= 99.0f);
+        bool rawPlugged = ::gunPhysicallyConnected || ::batteryConnected;
         
-        // Also check physical gun connection for safety
-        bool plugged = ::gunPhysicallyConnected && voltageDetected;
-        
-        static bool lastState = false;
-        if (plugged != lastState) {
-            Serial.printf("[OCPP_SM] 🔌 Vehicle detection: gun=%d voltage=%.1fV → %s\n",
-                         ::gunPhysicallyConnected, ::terminalVolt, plugged ? "CONNECTED" : "DISCONNECTED");
-            lastState = plugged;
+        // 1000ms Digital Debounce to prevent StatusNotification flapping 
+        static bool lastRawState = false;
+        static uint32_t lastChangeTime = 0;
+        static bool debouncedPlugged = false;
+
+        if (rawPlugged != lastRawState) {
+            lastRawState = rawPlugged;
+            lastChangeTime = millis();
+        }
+
+        if (rawPlugged != debouncedPlugged && (millis() - lastChangeTime > 1000)) {
+            debouncedPlugged = rawPlugged;
+            Serial.printf("[OCPP_SM] 🔌 Vehicle detection (debounced 1s): gun/batt=%d → %s\n",
+                         rawPlugged, debouncedPlugged ? "CONNECTED" : "DISCONNECTED");
         }
         
-        return plugged;
+        return debouncedPlugged;
     }
 
     bool OCPPStateMachine::isHardwareSafe()

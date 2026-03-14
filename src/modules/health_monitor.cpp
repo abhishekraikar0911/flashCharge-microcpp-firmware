@@ -1,5 +1,5 @@
 #include "../include/health_monitor.h"
-#include "../include/wifi_manager.h"
+#include "../include/modules/network_manager.h"
 #include "../include/header.h"
 #include <Arduino.h>
 
@@ -53,7 +53,8 @@ namespace prod
         }
         lastHealthCheck = now;
 
-        if (g_wifiManager.isConnected())
+        // Use NetworkManager for unified connection check
+        if (g_networkManager.isConnected())
         {
             lastWiFiConnectTime = now;
         }
@@ -77,7 +78,8 @@ namespace prod
 
     bool HealthMonitor::isWiFiDisconnectTimeout() const
     {
-        if (!transactionInProgress || g_wifiManager.isConnected())
+        // Suppress timeout if transaction not in progress or network connected
+        if (!transactionInProgress || g_networkManager.isConnected())
         {
             return false;
         }

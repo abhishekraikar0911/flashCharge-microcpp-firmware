@@ -15,17 +15,44 @@
 #define CAN1_RX_PIN GPIO_NUM_22
 #define CAN1_BAUDRATE 250000
 
-// CAN2 - MCP2515 (SPI) - Vehicle BMS
-#define CAN2_CS_PIN 5
-#define CAN2_INT_PIN 4
-#define CAN2_SCK_PIN 18
-#define CAN2_MISO_PIN 19
-#define CAN2_MOSI_PIN 23
+// CAN2 - MCP2515 (SPI) - Vehicle BMS (CONSOLIDATED LEFT SIDE)
+#define CAN2_CS_PIN   26
+#define CAN2_SCK_PIN  14
+#define CAN2_MOSI_PIN 27
+#define CAN2_MISO_PIN 25    // MOVED from 12 to avoid Strapping Pin conflict (MTDI)
+#define CAN2_INT_PIN  34    // CONNECTED: Using Interrupt Mode
 #define CAN2_BAUDRATE 250000
-#define MCP2515_CRYSTAL_8MHZ  // CRITICAL: 8MHz crystal on MCP2515 module
+#define MCP2515_CRYSTAL_8MHZ 
 
 #define CAN_RX_QUEUE_SIZE 64
 #define CAN_TX_QUEUE_SIZE 16
+
+// ========== GSM MODEM CONFIGURATION (SIM A7670C) ==========
+#define GSM_TX_PIN        17         // ESP32 TX → Modem RXD (UART2)
+#define GSM_RX_PIN        16         // ESP32 RX ← Modem TXD (UART2)
+#define GSM_RESET_PIN     23         // Modem RESET (Left Side - Pulse 2.5s)
+#define GSM_BAUD_RATE     115200
+#define GSM_SERIAL        Serial2    // Hardware UART2
+
+// GSM APN Configuration
+#define GSM_APN           "JIOCIOT2"
+#define GSM_APN_USER      ""
+#define GSM_APN_PASS      ""
+
+// GSM Timing Configuration
+#define GSM_RESET_PULSE_MS      2500   // Active-HIGH reset pulse duration
+#define GSM_AT_TIMEOUT_MS       30000  // AT command watchdog timeout
+#define GSM_CONNECT_TIMEOUT_MS  60000  // Network registration timeout
+#define GSM_MAX_RETRIES         3      // Retries before WiFi fallback
+#define GSM_RECHECK_INTERVAL_MS 120000 // Retry GSM every 2 min while on WiFi
+#define GSM_CIPSTATUS_INTERVAL  30000  // AT+CIPSTATUS check interval
+#define GSM_WS_IDLE_TIMEOUT_MS  120000 // WebSocket idle watchdog (120s)
+
+// ========== LED AND INTERFACE CONFIGURATION ==========
+#define LED_WIFI          32         // Status LED 1: Network/WiFi
+#define LED_AVAIL         33         // Status LED 2: Availability/Charging
+#define BTN_ESTOP         34         // Emergency Stop (Active LOW)
+#define BTN_REBOOT        35         // System Reboot (Active LOW)
 
 // ========== SAFETY LIMITS ==========
 #define MIN_VOLTAGE_V 56.0f
@@ -57,8 +84,9 @@
 #define TASK_STACK_SIZE_CAN_RX 6144       // Increased from 4096 — proven stable
 #define TASK_STACK_SIZE_CHARGER_COMM 6144  // Increased from 4096 — prevents stack overflow
 #define TASK_STACK_SIZE_UI 4096
-#define TASK_STACK_SIZE_OCPP 16384         // Increased from 10240 — WSS/TLS (MbedTLS) handshake needs 16KB
+#define TASK_STACK_SIZE_OCPP 24576         // Increased to 24KB - MbedTLS handshake + MicroOcpp can be heavy
 #define TASK_STACK_SIZE_WATCHDOG 2048
+#define TASK_STACK_SIZE_NETWORK 8192       // GSM/WiFi state machine + TLS
 
 // ========== TASK PRIORITIES ==========
 #define TASK_PRIORITY_WATCHDOG 9

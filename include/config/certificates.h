@@ -12,8 +12,8 @@
  */
 
 // ISRG Root X1 (Let's Encrypt Root CA)
-// Note: Using standard string literal to avoid leading newline issues with MbedTLS
-const char ISRG_ROOT_X1_CERT[] PROGMEM = 
+// Note: Removed PROGMEM to rule out alignment/access issues with MbedTLS
+const char ISRG_ROOT_X1_CERT[] = 
 "-----BEGIN CERTIFICATE-----\n"
 "MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\n"
 "TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh\n"
@@ -44,4 +44,4 @@ const char ISRG_ROOT_X1_CERT[] PROGMEM =
 "4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA\n"
 "mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d\n"
 "emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
-"-----END CERTIFICATE-----";
+"-----END CERTIFICATE-----\n";

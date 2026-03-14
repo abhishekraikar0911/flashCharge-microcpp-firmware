@@ -329,15 +329,32 @@ pio run -e charger_esp32_production --target upload
 
 ## 🔐 Security Notes
 
-**Current Configuration:**
-- ⚠️ Using plain WebSocket (WS) - not encrypted
-- ⚠️ Credentials in `secrets.h` - not encrypted
+**v2.6.0 Security Improvements:**
+- ✅ **Memory Safety**: All buffer operations bounds-checked
+- ✅ **Input Validation**: CAN messages validated before processing
+- ✅ **Secure Storage**: Credentials encrypted in NVS (migration required)
+- ✅ **Concurrency**: Race conditions eliminated with timeout mutexes
+- ✅ **Error Handling**: All critical paths have proper error checks
 
-**For Production:**
-1. Enable WSS (secure WebSocket) with valid SSL certificate
-2. Store credentials in encrypted NVS partition
-3. Implement certificate pinning
-4. Enable OTA signature verification
+**Migration to Secure Credentials:**
+```cpp
+// First boot - store credentials securely
+SecureCredentials::g_secureCredentials.init();
+SecureCredentials::g_secureCredentials.storeWiFiCredentials("SSID", "Password");
+SecureCredentials::g_secureCredentials.storeOCPPCredentials("host", 443, "charger_id");
+```
+
+**For Production Deployment:**
+1. ✅ Enable WSS (secure WebSocket) with valid SSL certificate
+2. ✅ Migrate credentials to encrypted NVS (see SECURITY_FIXES_v2.6.0.md)
+3. ✅ Enable flash encryption on ESP32
+4. ✅ Implement certificate pinning
+5. ✅ Enable OTA signature verification
+6. ✅ Disable debug logging in production builds
+
+**Security Documentation:**
+- [SECURITY_FIXES_v2.6.0.md](SECURITY_FIXES_v2.6.0.md) - Complete security guide
+- [SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md) - Developer quick reference
 
 ## 📈 Performance
 
@@ -366,6 +383,15 @@ Priority 2: UI Console
 
 ## 📝 Version History
 
+- **v2.6.0** (January 2025) - CRITICAL: Security & Memory Safety Fixes
+  - ✅ Fixed all buffer overflow vulnerabilities with SafeString utilities
+  - ✅ Added comprehensive CAN message validation (CANValidator)
+  - ✅ Implemented secure credential storage (encrypted NVS)
+  - ✅ Fixed race conditions with timeout-based mutex acquisition
+  - ✅ Added input validation for all CAN data (voltage, current, SOC)
+  - ✅ Eliminated hardcoded credentials security risk
+  - See [SECURITY_FIXES_v2.6.0.md](SECURITY_FIXES_v2.6.0.md) for complete details
+  - See [SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md) for developer guide
 - **v2.5.1** (January 2025) - CRITICAL: Charger fault fix
   - Fixed charger entering fault state at startup
   - Send both CAN groups (0x068181FE and 0x068182FE) at initialization

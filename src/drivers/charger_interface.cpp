@@ -5,9 +5,11 @@
 #include "debug_logger.h"
 #include "utils/log_macros.h"
 #include "utils/can_status_logger.h"
+#include "utils/can_validator.h"
 #include <Arduino.h>
 #include <string.h>
 #include "drivers/can_utils.h"
+#include "modules/system_state.h"
 
 // Toggle OCPP telemetry here (set to 1 to enable, 0 to disable)
 #define ENABLE_OCPP_TELEMETRY 0
@@ -38,8 +40,23 @@ static void decode_18FF50E5(const twai_message_t &msg);
 
 void handleChargerMessage(const twai_message_t &msg)
 {
+    // CRITICAL FIX: Validate message before processing
+    if (!CANValidator::validateMessage(msg))
+    {
+        Serial.println("[CAN] ⚠️  Invalid message structure, dropping");
+        return;
+    }
+
+    // CRITICAL FIX: Validate raw data is not noise
+    if (!CANValidator::validateRawData(msg.data, msg.data_length_code))
+    {
+        Serial.println("[CAN] ⚠️  Message appears to be noise/garbage, dropping");
+        return;
+    }
+
     const uint8_t dlc = msg.data_length_code;
-    memcpy(lastData, msg.data, dlc > 8 ? 8 : dlc);
+    // FIX: Bounds check before memcpy
+    memcpy(lastData, msg.data, (dlc > 8) ? 8 : dlc);
 
     const uint32_t id = msg.extd ? (msg.identifier & 0x1FFFFFFFUL)
                                  : (msg.identifier & 0x7FF);
@@ -98,6 +115,12 @@ static void decode_0681817E(const twai_message_t &msg)
         {
             memcpy(lastVmaxData, msg.data, dlc > 8 ? 8 : dlc);
             Charger_Vmax = raw / 1024.0f;
+            // CRITICAL FIX: Validate voltage reading
+            if (!CANValidator::validateVoltage(Charger_Vmax))
+            {
+                Serial.printf("[CAN] ⚠️  Invalid Vmax: %.1fV, ignoring\n", Charger_Vmax);
+                Charger_Vmax = 0.0f;
+            }
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
                 Serial.printf("[CHARGER]   ← Vmax=%.1fV\n", Charger_Vmax);
             }
@@ -106,6 +129,12 @@ static void decode_0681817E(const twai_message_t &msg)
         {
             memcpy(lastImaxData, msg.data, dlc > 8 ? 8 : dlc);
             Charger_Imax = raw / 30.5f;
+            // CRITICAL FIX: Validate current reading
+            if (!CANValidator::validateCurrent(Charger_Imax))
+            {
+                Serial.printf("[CAN] ⚠️  Invalid Imax: %.1fA, ignoring\n", Charger_Imax);
+                Charger_Imax = 0.0f;
+            }
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
                 Serial.printf("[CHARGER]   ← Imax=%.1fA\n", Charger_Imax);
             }
@@ -113,7 +142,7 @@ static void decode_0681817E(const twai_message_t &msg)
         if (Charger_Vmax >= 40.0f && Charger_Vmax <= 90.0f)
         {
             batteryConnected = true;
-            gunPhysicallyConnected = true;
+            SystemState::instance().setBatteryConnected(true);
             lastBMS = millis();
         }
         xSemaphoreGive(dataMutex);
@@ -135,6 +164,14 @@ static void decode_0681827E(const twai_message_t &msg)
         return;
     const uint8_t func = msg.data[1];
 
+    // Debug logging
+    if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+        Serial.printf("[CHARGER] RX: 0x%08lX Func=0x%02X Data: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                     (unsigned long)(msg.identifier & 0x1FFFFFFFUL), func,
+                     msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                     msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+    }
+
     // FIX: Use timeout to prevent deadlock
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
@@ -142,22 +179,45 @@ static void decode_0681827E(const twai_message_t &msg)
         {
             memcpy(lastBattData, msg.data, dlc > 8 ? 8 : dlc);
             chargerVolt = parseBEUint32(&msg.data[4]) / 1024.0f;
+            // CRITICAL FIX: Validate voltage
+            if (!CANValidator::validateVoltage(chargerVolt))
+            {
+                Serial.printf("[CAN] ⚠️  Invalid voltage: %.1fV\n", chargerVolt);
+                chargerVolt = 0.0f;
+            }
+            terminalVolt = chargerVolt; // Sync for now
+            SystemState::instance().setTerminalVolt(terminalVolt);
 
             if (chargerVolt >= 40.0f && chargerVolt <= 90.0f)
             {
                 batteryConnected = true;
-                gunPhysicallyConnected = true;
+                SystemState::instance().setBatteryConnected(true);
+            }
+            if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+                Serial.printf("[CHARGER]   ← Voltage: %.1fV\n", chargerVolt);
             }
         }
         else if (func == 0x82)
         {
             memcpy(lastCurrData, msg.data, dlc > 8 ? 8 : dlc);
             chargerCurr = parseBEUint16(&msg.data[6]) / 1024.0f;
+            // CRITICAL FIX: Validate current
+            if (!CANValidator::validateCurrent(chargerCurr))
+            {
+                Serial.printf("[CAN] ⚠️  Invalid current: %.1fA\n", chargerCurr);
+                chargerCurr = 0.0f;
+            }
+            terminalCurr = chargerCurr; // Sync for now
+            SystemState::instance().setTerminalCurr(terminalCurr);
+            if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+                Serial.printf("[CHARGER]   ← Current: %.1fA\n", chargerCurr);
+            }
         }
         else if (func == 0x80)
         {
             memcpy(lastTempData, msg.data, dlc > 8 ? 8 : dlc);
             chargerTemp = parseBEUint16(&msg.data[6]) * 0.001f;
+            SystemState::instance().setChargerTemp(chargerTemp);
         }
         else if (func == 0x79)
         {
@@ -200,7 +260,20 @@ static void decode_00433F01(const twai_message_t &msg)
         memcpy(lastTermData1, msg.data, dlc > 8 ? 8 : dlc);
         
         terminalVolt = parseBEFloat(&msg.data[0]);
-        terminalCurr = parseBEFloat(&msg.data[4]);  // Already scaled correctly
+        terminalCurr = parseBEFloat(&msg.data[4]);
+        
+        // CRITICAL FIX: Validate readings
+        if (!CANValidator::validateVoltage(terminalVolt))
+        {
+            Serial.printf("[CAN] ⚠️  Invalid terminal voltage: %.1fV\n", terminalVolt);
+            terminalVolt = 0.0f;
+        }
+        if (!CANValidator::validateCurrent(terminalCurr))
+        {
+            Serial.printf("[CAN] ⚠️  Invalid terminal current: %.1fA\n", terminalCurr);
+            terminalCurr = 0.0f;
+        }
+        
         terminalchargerPower = terminalVolt * terminalCurr;
         
         if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
@@ -215,7 +288,6 @@ static void decode_00433F01(const twai_message_t &msg)
         if (terminalVolt >= 40.0f && terminalVolt <= 90.0f)
         {
             batteryConnected = true;
-            gunPhysicallyConnected = true;
             lastBMS = millis();
         }
 
@@ -264,6 +336,12 @@ static void decode_18FF50E5(const twai_message_t &msg)
         const bool alive = (msg.data[4] & 0x08) != 0; // bit 3 alive
         terminalchargerStatus = alive ? "HEARTBEAT ALIVE" : "NO HEARTBEAT";
         
+        // Debug logging
+        if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
+            Serial.printf("[CHARGER] RX: HEARTBEAT (0x%08lX) -> %s\n", 
+                         (unsigned long)(msg.identifier & 0x1FFFFFFFUL), terminalchargerStatus);
+        }
+
         // CRITICAL: Update timestamp for charger health monitoring
         lastHeartbeat = millis();
         
@@ -510,11 +588,12 @@ void chargerCommTask(void *arg)
             lastSOCRequest = millis();
         }
 
-        // Drain RX queues and dispatch
+        // Drain RX queues and dispatch (Limited to 10 per cycle to prevent CPU hogging)
         RxBufItem item;
+        int processed = 0;
         
         // Poll CAN1 (Charger messages)
-        while (CAN_TWAI::popFrame(item))
+        while (processed < 10 && CAN_TWAI::popFrame(item))
         {
             twai_message_t msg = {};
             msg.identifier = item.id;
@@ -524,10 +603,12 @@ void chargerCommTask(void *arg)
             memcpy(msg.data, item.data, 8);
 
             handleChargerMessage(msg);
+            processed++;
         }
         
         // Poll CAN2 (BMS messages)
-        while (CAN_MCP2515::popFrame(item))
+        processed = 0;
+        while (processed < 10 && CAN_MCP2515::popFrame(item))
         {
             twai_message_t msg = {};
             msg.identifier = item.id;
@@ -544,9 +625,10 @@ void chargerCommTask(void *arg)
             {
                 handleSOCMessage(msg);
             }
+            processed++;
         }
 
-        prod::g_healthMonitor.feed();
+        // prod::g_healthMonitor.feed(); // DISABLED for testing
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -671,6 +753,7 @@ bool isChargerModuleHealthy()
     
     // Update global status
     chargerModuleOnline = healthy;
+    SystemState::instance().setChargerModuleOnline(healthy);
     
     return healthy;
 }

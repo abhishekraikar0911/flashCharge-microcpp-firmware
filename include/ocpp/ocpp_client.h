@@ -85,6 +85,7 @@ namespace ocpp
     bool endTransactionSafe(const char *idTag = nullptr, const char *reason = nullptr, unsigned int connectorId = 1);
     bool isTransactionActiveSafe(unsigned int connectorId = 1);
     bool isTransactionRunningSafe(unsigned int connectorId = 1);
+    int getTransactionIdSafe(unsigned int connectorId = 1);
     bool ocppPermitsChargeSafe(unsigned int connectorId = 1);
 
 } // namespace ocpp

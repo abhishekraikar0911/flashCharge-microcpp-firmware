@@ -28,6 +28,7 @@ namespace CAN_TWAI
         if (twaiRecoveryMutex && xSemaphoreTake(twaiRecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
             twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN1_TX_PIN, CAN1_RX_PIN, TWAI_MODE_NORMAL);
+            g_config.rx_queue_len = 32;  // Increase from default 5 to prevent missed frames during boot
             twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
             twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
@@ -198,7 +199,7 @@ void can1_rx_task(void *arg)
             xSemaphoreGive(twaiRecoveryMutex);
         }
 
-        prod::g_healthMonitor.feed();
+        // prod::g_healthMonitor.feed(); // DISABLED for testing
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

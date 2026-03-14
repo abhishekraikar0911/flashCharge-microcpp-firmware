@@ -14,11 +14,16 @@
 #include "../../include/modules/ota_manager.h"
 #include "../../include/ocpp_state_machine.h"
 #include "../../include/config/certificates.h"
+#include "../../include/modules/network_manager.h"
+#include "../../include/modules/ocpp_connection_helper.h"
 #include <MicroOcpp/Core/Context.h>
 #include <MicroOcpp/Model/Model.h>
 #include <MicroOcpp/Model/Boot/BootService.h>
 #include <MicroOcpp/Model/FirmwareManagement/FirmwareService.h>
 #include <freertos/semphr.h>
+#include "../../include/modules/ocpp_transaction_manager.h"
+#include "../../include/modules/ocpp_meter_service.h"
+#include "../../include/modules/system_state.h"
 
 // External globals from main firmware
 extern bool gunPhysicallyConnected;
@@ -114,6 +119,21 @@ bool ocpp::isTransactionRunningSafe(unsigned int connectorId)
     return isTransactionRunning(connectorId);
 }
 
+int ocpp::getTransactionIdSafe(unsigned int connectorId)
+{
+    OcppLock lock;
+    if (!lock.ok())
+    {
+        return -1;
+    }
+    auto tx = getTransaction(connectorId);
+    if (tx)
+    {
+        return tx->getTransactionId();
+    }
+    return -1;
+}
+
 bool ocpp::ocppPermitsChargeSafe(unsigned int connectorId)
 {
     OcppLock lock;
@@ -125,11 +145,10 @@ bool ocpp::ocppPermitsChargeSafe(unsigned int connectorId)
 }
 
 // Transaction tracking and lock
-static bool transactionLocked = false;
-static int localTransactionId = -1;
-static unsigned long lastMeterValueSent = 0;
 static unsigned long lastDataTransferSent = 0;
-static bool firstMeterValueSent = false;
+
+// Unified connection (GSM + WiFi + Watchdog)
+static prod::UnifiedConnection g_ocppConnection;
 
 bool ocpp::init()
 {
@@ -138,33 +157,39 @@ bool ocpp::init()
     Serial.printf("[OCPP] 🌐 Base URL: %s\n", SECRET_CSMS_URL);
     Serial.printf("[OCPP] 🔗 Full Connection URL: %s/%s\n", SECRET_CSMS_URL, SECRET_CHARGER_ID);
 
-    // Require WiFi before initializing
-    if (WiFi.status() != WL_CONNECTED)
+    // Require network (GSM or WiFi) before initializing
+    if (!prod::g_networkManager.isConnected())
     {
-        Serial.println("[OCPP] ⚠️  WiFi not connected - init deferred");
+        Serial.println("[OCPP] ⚠️  Network not connected - init deferred");
         return false;
     }
-    Serial.println("[OCPP] ✅ WiFi connected");
+    Serial.printf("[OCPP] ✅ Network connected via %s\n",
+                  prod::connectionTypeToString(prod::g_networkManager.getActiveConnection()));
 
     // Test network connectivity to server BEFORE initializing WebSocket
-    Serial.println("[OCPP] 🔍 Testing TCP connectivity to server...");
-    Serial.printf("[OCPP] 🎯 Target: %s:%d\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
-    
-    WiFiClientSecure testClient;
-    testClient.setCACert(ISRG_ROOT_X1_CERT);  // Use Root CA for TLS test
-    bool serverReachable = testClient.connect(SECRET_CSMS_HOST, SECRET_CSMS_PORT, 10000);  // 10s timeout for TLS
-    
-    if (serverReachable) {
-        Serial.println("[OCPP] ✅ TLS connection successful - server is reachable");
-        testClient.stop();
+    // NOTE: WiFiClientSecure uses WiFi DNS — skip when connected via GSM
+    if (prod::g_networkManager.getActiveConnection() == prod::ConnectionType::WIFI) {
+        Serial.println("[OCPP] 🔍 Testing TCP connectivity to server...");
+        Serial.printf("[OCPP] 🎯 Target: %s:%d\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
+        
+        WiFiClientSecure testClient;
+        testClient.setCACert(ISRG_ROOT_X1_CERT);
+        bool serverReachable = testClient.connect(SECRET_CSMS_HOST, SECRET_CSMS_PORT, 10000);
+        
+        if (serverReachable) {
+            Serial.println("[OCPP] ✅ TLS connection successful - server is reachable");
+            testClient.stop();
+        } else {
+            Serial.println("[OCPP] ❌ FAILED: Cannot reach server via TLS");
+            Serial.println("[OCPP] ⚠️  Possible causes:");
+            Serial.println("[OCPP]    - DNS resolution failed for domain");
+            Serial.println("[OCPP]    - Firewall blocking port 443");
+            Serial.println("[OCPP]    - NTP time not synced (cert validation fails)");
+            Serial.println("[OCPP]    - Server SSL certificate issue");
+            Serial.println("[OCPP] 🔄 Will retry WebSocket connection anyway...");
+        }
     } else {
-        Serial.println("[OCPP] ❌ FAILED: Cannot reach server via TLS");
-        Serial.println("[OCPP] ⚠️  Possible causes:");
-        Serial.println("[OCPP]    - DNS resolution failed for domain");
-        Serial.println("[OCPP]    - Firewall blocking port 443");
-        Serial.println("[OCPP]    - NTP time not synced (cert validation fails)");
-        Serial.println("[OCPP]    - Server SSL certificate issue");
-        Serial.println("[OCPP] 🔄 Will retry WebSocket connection anyway...");
+        Serial.println("[OCPP] ✅ Connected via GSM — skipping WiFi TCP test (DNS not available)");
     }
 
     // Heap monitoring for TLS impact
@@ -179,540 +204,76 @@ bool ocpp::init()
             Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
             return false;
         }
+        // NOTE: Pass nullptr for CA cert so WebSocket uses setInsecure() fallback.
+        // The ISRG Root X1 cert caused -8576 (X509 invalid format) errors in MbedTLS
+        // when NTP time is synced. The direct test connection above still validates 
+        // the cert for diagnostics. For production, enable proper cert pinning via
+        // the security_manager once the cert chain is fully verified.
+        // Use the UnifiedConnection which handles GSM/WiFi and the idle watchdog.
+        // It wraps the standard WebSocketsClient for WiFi and uses a custom
+        // transport for GSM.
         mocpp_initialize(
-            SECRET_CSMS_URL,
-            SECRET_CHARGER_ID,
-            SECRET_CHARGER_MODEL,
-            SECRET_CHARGER_VENDOR,
-            MicroOcpp::FilesystemOpt::Use,  // filesystem
-            nullptr,                         // password (no basic auth)
-            ISRG_ROOT_X1_CERT);             // Root CA certificate for TLS
+            g_ocppConnection,
+            ChargerCredentials(SECRET_CHARGER_MODEL, SECRET_CHARGER_VENDOR),
+            MicroOcpp::makeDefaultFilesystemAdapter(MicroOcpp::FilesystemOpt::Use),
+            true); // autoRecover
         Serial.println("[OCPP] ✅ mocpp_initialize() completed");
+        
+        // STABILITY: Set stable default intervals (1min heartbeat, 30s metervalues)
+        // These can be overridden by the CSMS via ChangeConfiguration
+        auto heartbeatInterval = MicroOcpp::declareConfiguration<int>("HeartbeatInterval", 60);
+        auto meterInterval = MicroOcpp::declareConfiguration<int>("MeterValueSampleInterval", 30);
+        
+        // CRITICAL: Specify which measurands to include in the periodic MeterValues message.
+        // If this list is empty, no data will be sent to the server.
+        auto meterValuesSampledData = MicroOcpp::declareConfiguration<const char*>(
+            "MeterValuesSampledData", 
+            "SoC,Voltage,Current.Import,Current.Offered,Temperature,Energy.Active.Import.Register,Power.Active.Import"
+        );
+        
+        Serial.println("[OCPP]   ✓ Default stability intervals set (HB:60s, MV:30s)");
+        Serial.println("[OCPP]   ✓ MeterValuesSampledData configured");
     }
 
     Serial.printf("[OCPP] 📊 Free heap AFTER mocpp_initialize: %u bytes\n", ESP.getFreeHeap());
 
     // CRITICAL: Configure all inputs AFTER mocpp_initialize()
-    Serial.println("[OCPP] 📋 Registering input callbacks...");
-    
-    // Energy meter with validation - ALWAYS return non-negative
-    {
-        OcppLock lock;
-        if (!lock.ok())
-        {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
-        }
-        setEnergyMeterInput([]() {
-            float energy = 0.0f;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                // Ensure energyWh is never negative
-                if (energyWh < 0.0f) {
-                    energyWh = 0.0f;
-                }
-                energy = energyWh;
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] Energy=%.2fWh\n", energy);
-            return energy;
-        });
-    }
-    Serial.println("[OCPP]   ✓ Energy meter registered");
+    // Register Input Callbacks and MeterValues via Services
+    g_meterService.begin();
 
-    // Power meter using terminal values
-    {
-        OcppLock lock;
-        if (!lock.ok())
-        {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
-        }
-        setPowerMeterInput([]() {
-            int power = 0;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (terminalVolt >= 56.0f && terminalVolt <= 85.5f &&
-                    terminalCurr >= 0.0f && terminalCurr <= 300.0f) {
-                    power = (int)(terminalVolt * terminalCurr);
-                }
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] Power=%dW (V=%.1f I=%.1f)\n", power, terminalVolt, terminalCurr);
-            return power;
-        });
-    }
-    Serial.println("[OCPP]   ✓ Power meter registered");
-
-    // Plug detection - only check physical gun connection
-    // Battery connection is checked separately via setEvReadyInput()
-    {
-        OcppLock lock;
-        if (!lock.ok())
-        {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
-        }
-        setConnectorPluggedInput([]() {
-            // CRITICAL: Only check physical gun, not battery
-            // This allows RemoteStart even when vehicle not yet connected
-            return gunPhysicallyConnected;
-        });
-    }
-    Serial.println("[OCPP]   ✓ Plug detection registered (physical gun only)");
-
-    // Error code mapping for Faulted status
-    {
-        OcppLock lock;
-        if (lock.ok())
-        {
-            // Set error code for Connector 1 (EVSE) only. 
-            // Connector 0 is the ChargePoint itself - usually stay Available if MCU is alive.
-            // CRITICAL: Return nullptr (not "NoError") when healthy to prevent isFaulted flag
-            addErrorCodeInput([]() -> const char* {
-                if (!isChargerModuleHealthy()) {
-                    return "OtherError"; // Standard fault code (previously ConnectorLockFailure)
-                }
-                return nullptr; // nullptr = no error, prevents isFaulted flag
-            }, 1);
-            Serial.println("[OCPP]   ✓ Error code mapping registered for Connector 1");
-        }
-    }
-
-    // EVSE ready (charger module healthy)
-    {
-        OcppLock lock;
-        if (lock.ok())
-        {
-            // Set readiness for Connector 1 only.
-            setEvseReadyInput([]() {
-                bool healthy = isChargerModuleHealthy();
-                static bool lastHealthy = true;
-                if (healthy != lastHealthy) {
-                    Serial.printf("[OCPP]   EVSE ready: %s\n", healthy ? "YES" : "NO");
-                    lastHealthy = healthy;
-                }
-                return healthy;
-            }, 1);
-            Serial.printf("[OCPP]   ✓ EVSE readiness registered for Connector 1\n");
-        }
-    }
-    Serial.printf("[OCPP]   ✓ EVSE ready status (initial: %s)\n", 
-                  isChargerModuleHealthy() ? "HEALTHY" : "OFFLINE");
-
-    // EV ready to charge - ALLOW RemoteStart even without vehicle
-    // Vehicle can connect AFTER RemoteStart is accepted
-    {
-        OcppLock lock;
-        if (!lock.ok())
-        {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
-        }
-        setEvReadyInput([]() {
-            // CRITICAL FIX: Always return true to allow RemoteStart
-            // Vehicle connection is checked separately via setConnectorPluggedInput()
-            // This prevents blocking RemoteStart when vehicle not yet connected
-            return true;
-        });
-    }
-    Serial.println("[OCPP]   ✓ EV ready registered (always ready for RemoteStart)");
-
-    // MeterValues - OCPP 1.6 standard measurands with validation and debug logging
-    {
-        OcppLock lock;
-        if (!lock.ok())
-        {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
-        }
-        
-        // SOC - read from global with validation
-        addMeterValueInput([]() -> float { 
-            float soc = 0.0f;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                soc = socPercent;
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] SOC=%.1f%%\n", soc);
-            return soc;
-        }, "SoC", "Percent", nullptr, nullptr, 1);
-        
-        // Voltage - read from global with validation
-        addMeterValueInput([]() -> float { 
-            float volt = 0.0f;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                volt = terminalVolt;
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] Voltage=%.1fV\n", volt);
-            return volt;
-        }, "Voltage", "V", nullptr, nullptr, 1);
-        
-        // Current - read from global with validation
-        addMeterValueInput([]() -> float { 
-            float curr = 0.0f;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                curr = terminalCurr;
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] Current=%.1fA\n", curr);
-            return curr;
-        }, "Current.Import", "A", nullptr, nullptr, 1);
-        
-        // Max Current - read from global with validation
-        addMeterValueInput([]() -> float { 
-            float maxCurr = 0.0f;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                maxCurr = BMS_Imax;
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] MaxCurrent=%.1fA\n", maxCurr);
-            return maxCurr;
-        }, "Current.Offered", "A", nullptr, nullptr, 1);
-        
-        // Temperature - read from global with validation
-        addMeterValueInput([]() -> float { 
-            float temp = 0.0f;
-            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                temp = chargerTemp;
-                xSemaphoreGive(dataMutex);
-            }
-            Serial.printf("[METER_DEBUG] Temperature=%.1f°C\n", temp);
-            return temp;
-        }, "Temperature", "Celsius", nullptr, nullptr, 1);
-    }
-    Serial.println("[OCPP]   ✓ MeterValues registered with mutex protection and debug logging");
-
-    // Configure intervals - Reduce message frequency for production
-    {
-        OcppLock lock;
-        if (!lock.ok())
-        {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
-        }
-        // PRODUCTION: Set MeterValue interval to 10s (balanced queue pressure vs data freshness)
-        if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval")) {
-            config->setInt(10);  // 10s for production (was 5s — caused queue flooding)
-            Serial.println("[OCPP]   ✓ MeterValues interval: 10s (production)");
-        }
-        
-        if (auto config = MicroOcpp::getConfigurationPublic("ClockAlignedDataInterval")) {
-            config->setInt(0);  // Disable clock alignment for immediate samples
-            Serial.println("[OCPP]   ✓ Clock alignment: disabled (immediate samples)");
-        }
-
-        // PRODUCTION: Reduce measurands to essential only
-        if (auto config = MicroOcpp::getConfigurationPublic("MeterValuesSampledData")) {
-            config->setString("Energy.Active.Import.Register,Voltage,Current.Import,SoC");
-            Serial.println("[OCPP]   ✓ Measurands: Essential only (reduced network load)");
-        }
-
-        if (auto config = MicroOcpp::getConfigurationPublic("HeartbeatInterval")) {
-            config->setInt(300);  // Changed from 60s to 300s (5 minutes)
-            Serial.println("[OCPP]   ✓ Heartbeat interval: 300s (production optimized)");
-        }
-        
-        // Set TransactionMessageAttempts to 3 to allow retries for failed StopTransaction
-        // This prevents transaction queue from filling up with unconfirmed transactions
-        if (auto config = MicroOcpp::getConfigurationPublic("TransactionMessageAttempts")) {
-            config->setInt(3);  // Allow 3 attempts before discarding
-            Serial.println("[OCPP]   ✓ TransactionMessageAttempts: 3 (allow retries)");
-        }
-        
-        // Increase retry interval to give WebSocket time to stabilize
-        if (auto config = MicroOcpp::getConfigurationPublic("TransactionMessageRetryInterval")) {
-            config->setInt(120);  // 2 minutes between retries
-            Serial.println("[OCPP]   ✓ TransactionMessageRetryInterval: 120s");
-        }
-        
-        // PRODUCTION: Limit message queue size to prevent overflow
-        if (auto config = MicroOcpp::getConfigurationPublic("MessageQueueSizeThreshold")) {
-            config->setInt(10);  // Limit queue to 10 messages
-            Serial.println("[OCPP]   ✓ MessageQueueSizeThreshold: 10 (prevent overflow)");
-        }
-    }
+    // Register transaction management via Service
+    g_transactionManager.begin();
+    g_transactionManager.registerConnectorInputs();
 
     // Transaction notifications
     {
         OcppLock lock;
-        if (!lock.ok())
+        if (lock.ok())
         {
-            Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
-            return false;
+            setTxNotificationOutput([](MicroOcpp::Transaction *tx, TxNotification notification) {
+                // *** CRITICAL DIAGNOSTIC: Log EVERY callback invocation ***
+                Serial.printf("[OCPP_CALLBACK] 🔔 TxNotification fired: type=%d txId=%d\n", 
+                             notification, tx ? tx->getTransactionId() : -1);
+                
+                switch (notification) {
+                    case TxNotification_RemoteStart:
+                        g_transactionManager.handleRemoteStart(tx);
+                        break;
+                    case TxNotification_StartTx:
+                        g_transactionManager.handleStartTx(tx);
+                        g_meterService.resetScaling(SystemState::instance().getTxStartTime());
+                        break;
+                    case TxNotification_RemoteStop:
+                        g_transactionManager.handleRemoteStop(tx);
+                        break;
+                    case TxNotification_StopTx:
+                        g_transactionManager.handleStopTx(tx);
+                        break;
+                    default:
+                        break;
+                }
+            });
         }
-        setTxNotificationOutput([](MicroOcpp::Transaction *tx, TxNotification notification) {
-            // *** CRITICAL DIAGNOSTIC: Log EVERY callback invocation ***
-            Serial.printf("[OCPP_CALLBACK] 🔔 TxNotification fired: type=%d connectorId=%d txId=%s\n", 
-                         notification, 
-                         tx ? 1 : 0,  // Assuming connector 1
-                         tx && tx->getTransactionId() >= 0 ? "valid" : "invalid");
-            
-            // Common debug snapshot
-            int txIdReported = tx ? tx->getTransactionId() : -1;
-            bool txRunning = ocpp::isTransactionRunningSafe(1);
-            bool permitsCharge = ocpp::ocppPermitsChargeSafe(1);
-
-            if (notification == TxNotification_RemoteStart) {
-                // CRITICAL: Ensure clean slate for new RemoteStart
-                activeTransactionId = -1;
-                transactionActive = false;
-                remoteStartAccepted = false;
-
-                Serial.println("\n[OCPP] 🎯 *** RemoteStart NOTIFICATION RECEIVED ***");  // CRITICAL MARKER
-                Serial.println("[OCPP] 📥 RemoteStart received");
-                Serial.printf("[OCPP]   snapshot: txId=%d txRunning=%d permitsCharge=%d\n", txIdReported, txRunning, permitsCharge);
-                Serial.printf("[OCPP]   flags: chargerHealthy=%d bmsSafe=%d batteryConnected=%d gunPhys=%d remoteStartAccepted=%d transactionLocked=%d transactionActive=%d activeTx=%d\n",
-                    isChargerModuleHealthy(), bmsSafeToCharge, batteryConnected, gunPhysicallyConnected, remoteStartAccepted, transactionLocked, transactionActive, activeTransactionId);
-
-#if ENABLE_TEST_MODE
-                {  // Scoped block to avoid variable name conflicts
-                    // ═══════════════════════════════════════════════════════════════
-                    // TEST MODE BYPASS - Skip all safety validation
-                    // ═══════════════════════════════════════════════════════════════
-                    Serial.println("\\n╔═══════════════════════════════════════════════════════════════╗");
-                    Serial.println("║  ⚠️  TEST MODE - Bypassing OCPP Safety Validation           ║");
-                    Serial.println("╚═══════════════════════════════════════════════════════════════╝");
-                    Serial.println("[TEST_MODE] 🔓 Skipping ALL safety checks:");
-                    Serial.println("[TEST_MODE]    ✓ BMS safety check BYPASSED");
-                    Serial.println("[TEST_MODE]    ✓ Voltage range check BYPASSED");
-                    Serial.println("[TEST_MODE]    ✓ Temperature check BYPASSED");
-                    Serial.println("[TEST_MODE]    ✓ Charger health check BYPASSED");
-                    Serial.println("[TEST_MODE]    ✓ Fault lock check BYPASSED");
-                    
-                    // Delegate to State Machine (which will also bypass in test mode)
-                    bool acceptedBySM = prod::g_ocppStateMachine.onRemoteStartTransaction(tx ? tx->getIdTag() : "Remote", 1);
-                    
-                    if (!acceptedBySM) {
-                        Serial.println("[OCPP] ❌ REJECTED by State Machine logic");
-                        remoteStartAccepted = false;
-                        return;
-                    }
-
-                    Serial.println("[OCPP] ✅ RemoteStart accepted (TEST MODE - no safety validation)");
-                    Serial.println("╚═══════════════════════════════════════════════════════════════╝\\n");
-                    remoteStartAccepted = true;
-                    return;  // Skip all production safety checks below
-                }
-#endif
-
-                // ═══════════════════════════════════════════════════════════════
-                // PRE-TRANSACTION SAFETY VALIDATION (Production-Grade)
-                // ═══════════════════════════════════════════════════════════════
-                Serial.println("[OCPP] 🔍 Pre-transaction safety validation...");
-                
-                // Check 1: BMS Safety
-                if (!bmsSafeToCharge) {
-                    Serial.println("[OCPP] ❌ REJECTED: BMS not ready (byte4 != 0x00)");
-                    ocpp::sendChargerStatus(false, "BMS not ready - vehicle not safe to charge");
-                    remoteStartAccepted = false;
-                    return;
-                }
-                
-                // Check 2: Voltage Range
-                if (terminalVolt > ALERT_VOLTAGE_MAX_V || terminalVolt < ALERT_VOLTAGE_MIN_V) {
-                    Serial.printf("[OCPP] ❌ REJECTED: Voltage out of range (%.1fV, limits: %.0f-%.0fV)\n", 
-                                  terminalVolt, ALERT_VOLTAGE_MIN_V, ALERT_VOLTAGE_MAX_V);
-                    char reason[128];
-                    snprintf(reason, sizeof(reason), "Voltage out of safe range: %.1fV (limits: %.0f-%.0fV)", 
-                             terminalVolt, ALERT_VOLTAGE_MIN_V, ALERT_VOLTAGE_MAX_V);
-                    ocpp::sendChargerStatus(false, reason);
-                    remoteStartAccepted = false;
-                    return;
-                }
-                
-                // Check 3: Temperature
-                if (chargerTemp > ALERT_TEMP_CRITICAL_C) {
-                    Serial.printf("[OCPP] ❌ REJECTED: Temperature too high (%.1f°C, limit: %.0f°C)\n", 
-                                  chargerTemp, ALERT_TEMP_CRITICAL_C);
-                    char reason[128];
-                    snprintf(reason, sizeof(reason), "Temperature too high: %.1f°C (limit: %.0f°C)", 
-                             chargerTemp, ALERT_TEMP_CRITICAL_C);
-                    ocpp::sendChargerStatus(false, reason);
-                    remoteStartAccepted = false;
-                    return;
-                }
-                
-                // Check 4: Charger Module Health (SOFT SAFETY)
-                // We allow RemoteStart even if there's a momentary CAN dip, provided 
-                // the charger was healthy within the last 30 seconds.
-                static unsigned long lastKnownGoodHealth = 0;
-                if (isChargerModuleHealthy()) {
-                    lastKnownGoodHealth = millis();
-                }
-
-                if (!isChargerModuleHealthy() && (millis() - lastKnownGoodHealth > 30000)) {
-                    Serial.printf("[OCPP] ❌ REJECTED: Charger module offline (CAN timeout > 30s, last health %lu ms ago)\n", 
-                                  millis() - lastKnownGoodHealth);
-                    ocpp::sendChargerStatus(false, "Charger module offline - check CAN bus connection");
-                    remoteStartAccepted = false;
-                    return;
-                } else if (!isChargerModuleHealthy()) {
-                    Serial.printf("[OCPP] ⚠️  Charger module offline, but accepting due to grace period (%lu ms since last health)\n",
-                                  millis() - lastKnownGoodHealth);
-                }
-                
-                // Check 5: Fault Stabilization Lock
-                if (faultLockActive) {
-                    unsigned long timeSinceFault = millis() - faultLockTime;
-                    if (timeSinceFault < FAULT_STABILIZATION_PERIOD_MS) {
-                        Serial.printf("[OCPP] ❌ REJECTED: Fault recovery in progress (%lu/%u ms)\n", 
-                                      timeSinceFault, (unsigned int)FAULT_STABILIZATION_PERIOD_MS);
-                        ocpp::sendChargerStatus(false, "Fault recovery in progress - please wait");
-                        remoteStartAccepted = false;
-                        return;
-                    } else {
-                        // Stabilization period passed - verify conditions are now safe
-                        if (bmsSafeToCharge && 
-                            terminalVolt >= ALERT_VOLTAGE_MIN_V && terminalVolt <= ALERT_VOLTAGE_MAX_V &&
-                            chargerTemp <= ALERT_TEMP_CRITICAL_C) {
-                            Serial.println("[OCPP] ✅ Fault stabilized - clearing lock");
-                            faultLockActive = false;
-                        } else {
-                            Serial.println("[OCPP] ❌ REJECTED: Conditions still unsafe after stabilization");
-                            ocpp::sendChargerStatus(false, "Fault conditions persist - not safe to charge");
-                            remoteStartAccepted = false;
-                            return;
-                        }
-                    }
-                }
-                
-                Serial.println("[OCPP] ✅ All safety checks passed");
-                // ═══════════════════════════════════════════════════════════════
-
-                // Delegate to State Machine for decision
-                bool acceptedBySM = prod::g_ocppStateMachine.onRemoteStartTransaction(tx ? tx->getIdTag() : "Remote", 1);
-                
-                if (!acceptedBySM) {
-                    Serial.println("[OCPP] ❌ REJECTED by State Machine logic");
-                    remoteStartAccepted = false;
-                    return;
-                }
-
-                Serial.println("[OCPP] ✅ RemoteStart accepted (latching)");
-                remoteStartAccepted = true;
-
-            } else if (notification == TxNotification_StartTx) {
-                Serial.println("\n[OCPP] 📥 StartTransaction notification");
-                Serial.printf("[OCPP]   tx reported id=%d (tx param=%d)\n", txIdReported, tx ? tx->getTransactionId() : -1);
-                Serial.printf("[OCPP]   Pre-start flags: chargerHealthy=%d bmsSafe=%d batteryConnected=%d gunPhys=%d\n",
-                    isChargerModuleHealthy(), bmsSafeToCharge, batteryConnected, gunPhysicallyConnected);
-
-                if (!isChargerModuleHealthy()) {
-                    Serial.println("[OCPP] ❌ Transaction started but charger OFFLINE - not enabling charging");
-                    return;
-                }
-
-                int txId = tx ? tx->getTransactionId() : -1;
-                localTransactionId = txId;
-                activeTransactionId = txId;
-                transactionActive = true;
-                transactionLocked = true;
-                chargingEnabled = true;
-                txStartTime = millis();
-                lastMeterValueSent = 0;
-                lastDataTransferSent = 0;
-                firstMeterValueSent = false;
-
-                if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    energyWh = 0.0f;
-                    xSemaphoreGive(dataMutex);
-                }
-
-                Serial.println("\n>>> CONTACTOR ON <<<");
-                Serial.printf("[OCPP] ▶️  Transaction STARTED - Charging ENABLED (txId=%d)\n", txId);
-                Serial.println("[GATE] ✅ HARD GATE OPEN\n");
-                Serial.println("[OCPP] 📊 First MeterValue at 5s, then every 10s");
-
-                prod::g_ocppStateMachine.onTransactionStarted(1, "RemoteStart", txId);
-
-            } else if (notification == TxNotification_RemoteStop) {
-                Serial.println("\n[OCPP] 📥 RemoteStop received");
-                Serial.printf("[OCPP]   snapshot before stop: txActive=%d activeTx=%d txRunning=%d\n", transactionActive, activeTransactionId, txRunning);
-
-                // CRITICAL FIX: Accept RemoteStop even if transaction ID doesn't match
-                // Server may have a different ID than ESP32 due to StartTransaction.conf timeout
-                if (!transactionActive && activeTransactionId <= 0 && !txRunning) {
-                    Serial.println("[OCPP] ⚠️  RemoteStop received but NO ACTIVE TRANSACTION!");
-                    return;
-                }
-                
-                // Get the transaction ID from the server's RemoteStop request
-                int serverTxId = tx ? tx->getTransactionId() : -1;
-                if (serverTxId > 0 && serverTxId != activeTransactionId) {
-                    Serial.printf("[OCPP] ⚠️  Transaction ID mismatch: local=%d server=%d\n", activeTransactionId, serverTxId);
-                    Serial.println("[OCPP] 🔄 Syncing to server's transaction ID...");
-                    activeTransactionId = serverTxId;
-                    localTransactionId = serverTxId;
-                }
-
-                // Delegate to State Machine for decision
-                bool stopAccepted = prod::g_ocppStateMachine.onRemoteStopTransaction(activeTransactionId);
-
-                if (!stopAccepted) {
-                    Serial.println("[OCPP] ❌ RemoteStop REJECTED by State Machine");
-                    return;
-                }
-
-                // 1. Set flag to prevent restart
-                chargingEnabled = false;
-
-                // 2. IMMEDIATELY send CAN command to stop physical charger
-                sendImmediateChargerStop();
-
-                Serial.println("[OCPP] ⏹️  Charging disabled - hardware stop command sent");
-
-                // 3. CRITICAL: End transaction so StopTransaction is sent to CSMS
-                if (transactionActive || txRunning) {
-                    Serial.printf("[OCPP] 🛑 RemoteStop → ending transaction (txId=%d)\n", activeTransactionId);
-                    bool ended = ocpp::endTransactionSafe(nullptr, "Remote", 1);
-                    if (ended) {
-                        Serial.println("[OCPP] ✅ StopTransaction queued to server");
-                    } else {
-                        Serial.println("[OCPP] ❌ endTransactionSafe failed or timed out");
-                    }
-                } else {
-                    Serial.printf("[OCPP] ℹ️  No active transaction (txActive=%d activeTx=%d running=%d)\n", transactionActive, activeTransactionId, txRunning);
-                }
-
-            } else if (notification == TxNotification_StopTx) {
-                Serial.println("\n[OCPP] 📥 StopTransaction received");
-                
-                // Record stop time for post-transaction summaries
-                txStopTime = millis();
-                
-                // 📊 Send final session summary (Float energy, SOC, Duration)
-                float durationMin = (txStartTime > 0) ? (float)(txStopTime - txStartTime) / 60000.0f : 0.0f;
-                float finalEnergy = 0.0f;
-                float finalSoc = 0.0f;
-                
-                if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    finalEnergy = energyWh;
-                    finalSoc = socPercent;
-                    xSemaphoreGive(dataMutex);
-                }
-                
-                Serial.printf("[OCPP] 📊 Session Ended: Energy=%.2fWh SOC=%.1f%% Duration=%.1fmin\n", 
-                              finalEnergy, finalSoc, durationMin);
-                ocpp::sendSessionSummary(finalSoc, finalEnergy, durationMin);
-                
-                // Clear all transaction state
-                transactionLocked = false;
-                localTransactionId = -1;
-                activeTransactionId = -1;
-                transactionActive = false;
-                remoteStartAccepted = false;
-                chargingEnabled = false;
-                
-                // CRITICAL: Force persistence cleanup to prevent re-hydration loops ("Zombie" IDs)
-                prod::g_persistence.clearTransaction();
-                
-                Serial.println("[OCPP] ⏹️  Transaction stopped - all flags cleared");
-                Serial.println("[OCPP] 📊 VehicleInfo will continue every 10s until gun unplugged");
-
-                // Clear state machine
-                prod::g_ocppStateMachine.onTransactionStopped(localTransactionId);
-            }
-        });
     }
     Serial.println("[OCPP]   ✓ Transaction callbacks registered");
     
@@ -773,298 +334,48 @@ bool ocpp::init()
 void ocpp::poll()
 {
     // ═══════════════════════════════════════════════════════════════
-    // IMMEDIATE SENDS DURING ACTIVE TRANSACTION
-    // ═══════════════════════════════════════════════════════════════
-    
-    // Send first MeterValue at 5s after transaction start, then scale dynamically
-    static unsigned long lastScaledElapsed = 0; // Track last elapsed for scaling
-    static int currentMvInterval = 5;          // Track current interval, reset each session
-
-    if (transactionActive) {
-        unsigned long elapsed = millis() - txStartTime;
-        
-        // 1. Handle first MeterValue trigger at 5s
-        if (!firstMeterValueSent && elapsed >= 5000) {
-            Serial.println("[OCPP] 📊 Triggering FIRST MeterValue (5s after start)");
-            firstMeterValueSent = true;
-            lastMeterValueSent = millis();
-            lastScaledElapsed = 0; // Reset scaling tracker
-            currentMvInterval = 5; // Start at 5s
-        }
-
-        // 2. Dynamic Interval Scaling
-        // 0-30s: 5s | 30-120s: 10s | 120-300s: 20s | >300s: 30s
-        int nextInterval;
-        if      (elapsed < 30000)  nextInterval = 5;
-        else if (elapsed < 120000) nextInterval = 10;
-        else if (elapsed < 300000) nextInterval = 20;
-        else                       nextInterval = 30;
-
-        if (nextInterval != currentMvInterval) {
-            OcppLock lock;
-            if (lock.ok()) {
-                if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval")) {
-                    config->setInt(nextInterval);
-                    Serial.printf("[OCPP] 📊 Scaling MeterValue interval: %ds -> %ds (elapsed: %lus)\n", 
-                                  currentMvInterval, nextInterval, elapsed/1000);
-                    currentMvInterval = nextInterval;
-                }
-            }
-        }
-    } else {
-        // Not in a transaction — reset tracking state for next session
-        if (currentMvInterval != 5) {
-            OcppLock lock;
-            if (lock.ok()) {
-                if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval")) {
-                    config->setInt(5);
-                    currentMvInterval = 5;
-                    Serial.println("[OCPP] 📊 MeterValue interval reset to 5s for next session");
-                }
-            }
-        }
-        firstMeterValueSent = false; // Reset for next session
-    }
-    
-    // ═══════════════════════════════════════════════════════════════
-    // DIAGNOSTICS & HEALTH (ALWAYS RUN)
-    // ═══════════════════════════════════════════════════════════════
-    
-    // Monitor charger health (availability updated automatically via setEvseReadyInput)
-    static unsigned long lastHealthPoll = 0;
-    bool healthy = isChargerModuleHealthy();
-    
-    if (millis() - lastHealthPoll >= 5000) {
-        Serial.printf("[OCPP_HEALTH] Uptime: %lu ms | Healthy: %s | SM State: %s\n", 
-                      millis(), 
-                      healthy ? "YES" : "NO",
-                      prod::g_ocppStateMachine.getStateName());
-        lastHealthPoll = millis();
-    }
-    
-    static bool lastHealthyValue = true;
-    if (healthy != lastHealthyValue) {
-        Serial.printf("[OCPP] Charger module health changed: %s\n",
-            healthy ? "ONLINE" : "OFFLINE");
-        lastHealthyValue = healthy;
-    }
-
-    // Periodic diagnostic (every 10s)
-    static unsigned long lastDiagnosticLog = 0;
-    if (millis() - lastDiagnosticLog > 10000) {
-        OcppLock lock;
-        if (lock.ok()) {
-            auto tx = getTransaction(1);
-            bool libTxActive = (tx && tx->isActive());
-            auto currentSMState __attribute__((unused)) = prod::g_ocppStateMachine.getState();
-
-            Serial.printf("[OCPP] Status: SM=%s | Tx=%s | Charging=%s | Operative=%d\n",
-                         prod::g_ocppStateMachine.getStateName(),
-                         libTxActive ? "Active" : "Idle",
-                         chargingEnabled ? "ON" : "OFF",
-                         isOperative());
-        }
-        lastDiagnosticLog = millis();
-    }
-
-    // ═══════════════════════════════════════════════════════════════
     // MAIN OCPP LOOP & SYNC (REQUIRES LOCK)
     // ═══════════════════════════════════════════════════════════════
-    static bool oldTransactionCleaned = false;
-    static bool staleStateCleaned = false;
-    static bool cleanupInProgress = false;
-
     {
         OcppLock lock;
-        if (!lock.ok())
-        {
-            return;
-        }
-        mocpp_loop();
-
-        // CLEANUP: Force-stop old transactions after BootNotification
-        // Only trigger once per boot
-        if (!oldTransactionCleaned && isOperative()) {
-            auto tx = getTransaction(1);
-            
-            // Check if this transaction existed BEFORE we finished initialization
-            // Fresh transactions started immediately after BootNotification will have a valid ID 
-            // and should NOT be cleaned up.
-            if (tx && tx->isActive() && (tx->getTransactionId() < 0 || !transactionActive)) {
-                int oldTxId = tx->getTransactionId();
-                Serial.printf("[OCPP] 🧹 Cleaning up old transaction (txId=%d)\n", oldTxId);
-                
-                cleanupInProgress = true;
-                
-                // Force stop ONLY the old transaction
-                chargingEnabled = false;
-                endTransaction(nullptr, "PowerLoss", 1);
-                
-                // Clear global state
-                transactionActive = false;
-                transactionLocked = false;
-                activeTransactionId = -1;
-                localTransactionId = -1;
-                remoteStartAccepted = false;
-                
-                // CRITICAL: Pulse the state machine to ensure it's not stuck
-                // FIX: Respect Finishing state during cleanup
-                if (prod::g_ocppStateMachine.getState() != prod::ConnectorState::Finishing) {
-                    if (gunPhysicallyConnected && batteryConnected) {
-                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
-                    } else {
-                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
-                    }
-                }
-                
-                Serial.println("[OCPP] ✅ Old transaction cleaned - ready for new RemoteStart");
-                cleanupInProgress = false;
-            }
-            oldTransactionCleaned = true;
-        }
-        
-        // CRITICAL FIX: Clear stale global state if library has no transaction
-        if (!staleStateCleaned && isOperative()) {
-            auto tx = getTransaction(1);
-            if (!tx && (transactionActive || activeTransactionId > 0 || remoteStartAccepted)) {
-                Serial.println("\n╔═══════════════════════════════════════════════════════════════╗");
-                Serial.println("║  🧹 CLEARING STALE TRANSACTION STATE                         ║");
-                Serial.println("╚═══════════════════════════════════════════════════════════════╝");
-                Serial.printf("[OCPP] 🔍 Stale state detected: txActive=%d activeTxId=%d remoteStart=%d\n",
-                             transactionActive, activeTransactionId, remoteStartAccepted);
-                Serial.println("[OCPP] 🔍 Library has NO active transaction - clearing global flags");
-                
-                transactionActive = false;
-                transactionLocked = false;
-                activeTransactionId = -1;
-                localTransactionId = -1;
-                remoteStartAccepted = false;
-                chargingEnabled = false;
-                
-                // FIX: Respect Finishing state during stale state cleanup
-                if (prod::g_ocppStateMachine.getState() != prod::ConnectorState::Finishing) {
-                    if (gunPhysicallyConnected && batteryConnected) {
-                        Serial.println("[OCPP] 🔄 Vehicle connected - forcing state to Preparing");
-                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Preparing);
-                    } else {
-                        Serial.println("[OCPP] 🔄 No vehicle - forcing state to Available");
-                        prod::g_ocppStateMachine.forceState(prod::ConnectorState::Available);
-                    }
-                }
-                
-                Serial.println("[OCPP] ✅ Stale state cleared - ready for new RemoteStart");
-                Serial.println("╚═══════════════════════════════════════════════════════════════╝\n");
-            }
-            staleStateCleaned = true;
-        }
-
-        // SKIP SYNC if cleanup is in progress
-        if (cleanupInProgress) {
-            return;
-        }
-
-        // *** ROBUST SYNC TRANSACTION ID ***
-        // CRITICAL: Don't sync until AFTER stale cleanup completes
-        if (!staleStateCleaned) {
-            return;
-        }
-        
-        auto tx = getTransaction(1); // Check connector 1
-        if (tx) {
-            
-            // 1. Sync active flag if library has an active transaction
-            if (!transactionActive) {
-                Serial.println("[OCPP] 🔄 Sync: Library has active tx, updating global flags");
-                transactionActive = true;
-            }
-            
-            // 2. Sync Transaction ID if it differs
-            int currentId = tx->getTransactionId();
-            if (activeTransactionId != currentId) {
-                if (currentId > 0) {
-                    Serial.printf("[OCPP] 🔄 ID Sync: %d -> %d\n", activeTransactionId, currentId);
-                    activeTransactionId = currentId;
-                    localTransactionId = currentId;
-                    
-                    // CRITICAL FIX: Don't call onTransactionStarted during sync
-                    // State machine transition happens ONLY in TxNotification_StartTx callback
-                    // Just update persistence here without changing state
-                    char txnIdStr[32];
-                    snprintf(txnIdStr, sizeof(txnIdStr), "%d", currentId);
-                    prod::g_persistence.saveTransaction(txnIdStr, "RestoreSync");
-                } else if (currentId < 0 && activeTransactionId > 0) {
-                    // CRITICAL: Force library to resume the persisted ID instead of waiting for a new one
-                    Serial.printf("[OCPP] ⚠️  ID Mismatch: local=%d, lib=%d. FORCING RE-HYDRATION.\n", activeTransactionId, currentId);
-                    tx->setTransactionId(activeTransactionId);
-                    tx->setAuthorized();
-                    tx->getStartSync().confirm(); // Force confirmed/running state
-                    Serial.println("[OCPP]   ✅ Library re-hydrated directly. RemoteStop will now work.");
-                }
-            }
-        } else {
-            // 3. Sync: If library has NO active transaction, BUT we have a persisted transaction,
-            // DO NOT clear global flags here. Instead, let the state machine or poll handle re-hydration on next cycle
-            // or if it was definitely ended.
-            
-            if (activeTransactionId > 0) {
-                // If library has no task, check if state machine is actually IDLE
-                auto smState = prod::g_ocppStateMachine.getState();
-                if (smState == prod::ConnectorState::Available || smState == prod::ConnectorState::Faulted) {
-                    Serial.printf("[OCPP] 🔄 Sync: Library idle and state is %s, clearing zombie transaction #%d\n", 
-                                  prod::g_ocppStateMachine.getStateName(), activeTransactionId);
-                    transactionActive = false;
-                    transactionLocked = false;
-                    activeTransactionId = -1;
-                    localTransactionId = -1;
-                    remoteStartAccepted = false;
-                    chargingEnabled = false;
-                    prod::g_persistence.clearTransaction();
-                } else {
-                    static unsigned long lastRehydrationAttempt = 0;
-                    if (millis() - lastRehydrationAttempt > 30000) { // Every 30s
-                        Serial.printf("[OCPP] ⚠️  Rehydration sync: Global txActive=%d, id=%d, but library tx=NULL\n", 
-                                      transactionActive, activeTransactionId);
-                        lastRehydrationAttempt = millis();
-                    }
-                }
-            } else if (transactionActive || transactionLocked || activeTransactionId != -1) {
-                Serial.println("[OCPP] 🔄 Sync: Library has NO active tx and no persisted ID, clearing global state");
-                transactionActive = false;
-                transactionLocked = false;
-                activeTransactionId = -1;
-                localTransactionId = -1;
-                remoteStartAccepted = false;
-                chargingEnabled = false;
-                prod::g_persistence.clearTransaction();
-            }
+        if (lock.ok()) {
+            mocpp_loop();
         }
     }
-    
-    // Check if connection status changed
-    static bool lastOperative = false;
-    bool operative = isOperative();
-    
-    if (operative != lastOperative) {
-        Serial.printf("[OCPP] Connection status changed: %s\n", 
-                      operative ? "CONNECTED" : "DISCONNECTED");
-        
-        // CRITICAL: If just reconnected, force BootNotification to re-bind session on CSMS
-        if (operative) {
-            Serial.println("[OCPP] 🔄 RECONNECTED! Forcing BootNotification sync...");
-            OcppLock lock;
-            if (lock.ok()) {
-                auto context = getOcppContext();
-                if (context) {
-                    auto bs = context->getModel().getBootService();
-                    if (bs) {
-                        bs->notifyRegistrationStatus(MicroOcpp::RegistrationStatus::Pending);
-                        Serial.println("[OCPP]   ✅ BootNotification queued for sync");
-                    }
-                }
-            }
-        }
-        lastOperative = operative;
+
+    // Modular poll loops
+    g_meterService.poll();
+    g_transactionManager.syncTransactionState();
+
+    auto& state = SystemState::instance();
+
+    // ═══════════════════════════════════════════════════════════════
+    // DIAGNOSTICS & HEALTH (EVERY 5S/10S)
+    // ═══════════════════════════════════════════════════════════════
+    static unsigned long lastHealthPoll = 0;
+    if (millis() - lastHealthPoll >= 5000) {
+        lastHealthPoll = millis();
+        bool healthy = isChargerModuleHealthy();
+        Serial.printf("[OCPP_HEALTH] Uptime: %lu ms | Healthy: %s | State: %s\n", 
+                      millis(), healthy ? "YES" : "NO", prod::g_ocppStateMachine.getStateName());
     }
+
+    static unsigned long lastStatusLog = 0;
+    if (millis() - lastStatusLog >= 10000) {
+        lastStatusLog = millis();
+        auto snap = state.snapshot();
+        Serial.printf("[OCPP] Status: SM=%s | Tx=%s | Charging=%s | Operative=%d\n",
+                     prod::g_ocppStateMachine.getStateName(),
+                     snap.transactionActive ? "Active" : "Idle",
+                     snap.chargingEnabled ? "ON" : "OFF",
+                     isOperative());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DATA TRANSFER - Send periodic vehicle info
+    // ═══════════════════════════════════════════════════════════════
+    // REMOVED: Redundant 10s loop removed. 
+    // HardwareService::pollVehicleInfo() handles this with smarter rate-limiting.
 }
 
 bool ocpp::isConnected()

@@ -36,6 +36,7 @@ namespace prod
         // System health
         void recordRebootCount();
         uint32_t getRebootCount();
+        void resetRebootCount();
         void recordLastError(const char *error);
         const char *getLastError();
 
