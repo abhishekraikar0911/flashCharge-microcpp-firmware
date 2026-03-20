@@ -16,6 +16,8 @@
 #include "../../include/wifi_manager.h"
 #include "../../include/config/hardware.h"
 #include "../../include/health_monitor.h"
+#include "../../include/modules/system_state.h"
+#include "../../include/header.h"  // For extern bool ocppInitialized
 #include <Arduino.h>
 #include <WiFi.h>
 #include <time.h>
@@ -85,23 +87,46 @@ void NetworkManager::poll() {
             Serial.println("[NET] 🚀 Starting connection: GSM first...");
             break;
 
-        case NetworkState::GSM_CONNECTING:
-            if (attemptGSM()) {
+        case NetworkState::GSM_CONNECTING: {
+            GsmError err = attemptGSM();
+            bool charging = SystemState::instance().snapshot().transactionActive;
+
+            if (err == GsmError::SUCCESS) {
                 _state = NetworkState::GSM_CONNECTED;
                 _activeConnection = ConnectionType::GSM;
                 _gsmRetryCount = 0;
+                _lastActivityTime = millis();  // FIX: Reset idle watchdog — WS handshake needs time
                 syncNTP();
+                // FIX C: Kill WiFi radio when GSM is stable to prevent Ghost WiFi
+                if (WiFi.isConnected()) {
+                    WiFi.disconnect(true);
+                    Serial.println("[NET] 📵 WiFi disabled — GSM is primary (radio killed)");
+                }
                 Serial.println("[NET] ✅ Connected via GSM (Primary)");
             } else {
                 _gsmRetryCount++;
-                Serial.printf("[NET] ❌ GSM attempt %d/%d failed\n", _gsmRetryCount, GSM_MAX_RETRIES);
+                
+                // Industrial Context-Aware Failover
+                int maxRetries = charging ? GSM_CHARGING_MAX_RETRIES : GSM_MAX_RETRIES;
 
-                if (_gsmRetryCount >= GSM_MAX_RETRIES) {
-                    Serial.println("[NET] 🔄 GSM failed — falling back to WiFi...");
+                Serial.printf("[NET] ❌ GSM attempt %d/%d failed (Err=%d, Charging=%d)\n", 
+                              _gsmRetryCount, maxRetries, (int)err, charging);
+
+                // RAPID FAILOVER: If SIM is missing during charge, don't even retry. Switch to WiFi NOW.
+                bool fatalSimError = (err == GsmError::FAIL_FATAL_NO_SIM);
+                if ((fatalSimError && charging) || (_gsmRetryCount >= maxRetries)) {
+                    if (fatalSimError && charging) {
+                        Serial.println("[NET] 🚨 FATAL: SIM missing during Charge — Instant WiFi Fallback!");
+                    } else if (charging) {
+                        Serial.println("[NET] 🚀 Industrial Failover: Fast-tracking WiFi switch due to active transaction");
+                    } else {
+                        Serial.println("[NET] 🔄 GSM failed — falling back to WiFi...");
+                    }
                     _state = NetworkState::GSM_FAILED;
                 }
             }
             break;
+        }
 
         case NetworkState::GSM_FAILED:
             // Fall through to WiFi
@@ -112,6 +137,7 @@ void NetworkManager::poll() {
             if (attemptWiFi()) {
                 _state = NetworkState::WIFI_CONNECTED;
                 _activeConnection = ConnectionType::WIFI;
+                _lastActivityTime = millis(); // FIX: Reset watchdog after WiFi connects
                 Serial.println("[NET] ✅ Connected via WiFi (Fallback)");
             } else {
                 // WiFi also failed — retry GSM
@@ -126,11 +152,19 @@ void NetworkManager::poll() {
             g_gsmManager.poll();
 
             if (!g_gsmManager.isConnected()) {
-                Serial.println("[NET] ⚠️  GSM connection lost! Waiting 5s before recovery...");
+                bool charging = SystemState::instance().snapshot().transactionActive;
+                Serial.printf("[NET] ⚠️  GSM connection lost! (Charging=%d)\n", charging);
                 _activeConnection = ConnectionType::NONE;
                 _gsmRetryCount = 0;
-                // CRITICAL FIX: Allow modem to settle before reconnect
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                
+                // RAPID FALLBACK: Skip 5s wait if we are actively charging
+                if (!charging) {
+                    Serial.println("[NET] ⏳ Waiting 5s before recovery...");
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                } else {
+                    Serial.println("[NET] ⚡ Charging active — Skipping recovery delay");
+                }
+                
                 _state = NetworkState::GSM_CONNECTING;
             }
             break;
@@ -153,7 +187,7 @@ void NetworkManager::poll() {
         case NetworkState::GSM_RECHECK:
             // Try GSM while WiFi is still active
             Serial.println("[NET] 🔃 Rechecking GSM availability...");
-            if (attemptGSM()) {
+            if (attemptGSM() == GsmError::SUCCESS) {
                 // GSM is back! Disconnect WiFi, switch to GSM
                 Serial.println("[NET] 🌟 GSM recovered! Switching from WiFi to GSM...");
                 WiFi.disconnect(true);
@@ -171,7 +205,8 @@ void NetworkManager::poll() {
 
     // ── WebSocket Idle Watchdog (Level 3) ──
     // g_healthMonitor.feed(); // Feed watchdog during every poll - DISABLED for testing
-    if (isConnected() && now - _lastActivityTime >= GSM_WS_IDLE_TIMEOUT_MS) {
+    now = millis();
+    if (isConnected() && ocppInitialized && now - _lastActivityTime >= GSM_WS_IDLE_TIMEOUT_MS) {
         Serial.printf("[NET] ⚠️  WebSocket Idle Watchdog: No activity for %d s! Reconnecting...\n",
                       (int)((now - _lastActivityTime) / 1000));
         _lastActivityTime = now; // Reset to avoid constant trigger during reconnect
@@ -189,11 +224,26 @@ void NetworkManager::poll() {
 //  CONNECTION ATTEMPTS
 // ═══════════════════════════════════════════════════════════
 
-bool NetworkManager::attemptGSM() {
+GsmError NetworkManager::attemptGSM() {
     Serial.println("[NET] 📡 Attempting GSM connection...");
+
+    // FIX B: Forcibly drop any stale GPRS/PDP session before connecting.
+    if (g_gsmManager.isConnected()) {
+        Serial.println("[NET] 🧹 Cleaning stale GPRS session before reconnect...");
+        g_gsmManager.disconnect();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 
     // If modem is in ERROR state, try recovery first
     if (g_gsmManager.getState() == GSMState::ERROR) {
+        // RAPID FAILOVER: Check if SIM is physically missing to avoid 20s soft-reset penalty
+        if (g_gsmManager.getModem().testAT(1000)) {
+            if (g_gsmManager.getModem().getSimStatus() != SIM_READY) {
+                Serial.println("[NET] 🚨 FATAL: SIM is missing. Bypassing hardware recovery.");
+                return GsmError::FAIL_FATAL_NO_SIM;
+            }
+        }
+
         Serial.println("[NET] GSM in error state, attempting recovery...");
 
         // Tiered recovery
@@ -202,7 +252,11 @@ bool NetworkManager::attemptGSM() {
         }
     }
 
-    return g_gsmManager.connect();
+    // Industrial Context-Aware Timeout
+    bool charging = SystemState::instance().snapshot().transactionActive;
+    uint32_t timeout = charging ? GSM_CHARGING_CONNECT_TIMEOUT_MS : GSM_CONNECT_TIMEOUT_MS;
+
+    return g_gsmManager.connect(timeout);
 }
 
 bool NetworkManager::attemptWiFi() {
@@ -315,8 +369,14 @@ bool NetworkManager::isConnected() const {
 
 void NetworkManager::reconnect() {
     Serial.println("[NET] 🔄 Manual reconnect requested");
+    // FIX D: Allow 2s for OCPP message queue to drain stale responses
+    // before we tear down and rebuild the connection. Without this, old
+    // Heartbeat responses arrive after reconnect and corrupt the queue state.
+    Serial.println("[NET] ⏳ 2s OCPP queue drain...");
+    vTaskDelay(pdMS_TO_TICKS(2000));
     _activeConnection = ConnectionType::NONE;
     _gsmRetryCount = 0;
+    _lastActivityTime = millis();  // FIX 4: Reset idle watchdog to prevent re-firing during reconnect
     _state = NetworkState::GSM_CONNECTING;
 }
 

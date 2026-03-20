@@ -1,4 +1,6 @@
 #include "../include/wifi_manager.h"
+#include "../include/config/secure_config.h"
+#include "../include/utils/safe_string.h"
 #include <Arduino.h>
 
 namespace prod
@@ -6,24 +8,33 @@ namespace prod
 
     bool WiFiManager::begin(const char *ssid, const char *password)
     {
-        // For simplicity, we assume this is called once from main.cpp
-        // We will populate our internal list from secrets.h directly to ensure 1>2>3 priority
-        #include "../include/secrets.h"
+        // SECURITY FIX: Load credentials from encrypted storage instead of hardcoded values
+        Serial.println("[WiFi] 🔐 Loading WiFi credentials from secure storage...");
         
-        credentials[0] = {WIFI_SSID_1, WIFI_PASS_1};
-        credentials[1] = {WIFI_SSID_2, WIFI_PASS_2};
-        credentials[2] = {WIFI_SSID_3, WIFI_PASS_3};
+        // Load all three priority WiFi networks from secure storage
+        for (int i = 0; i < 3; i++)
+        {
+            char ssid[33], pass[64];
+            if (SecureConfig::getWiFiCredentials(ssid, pass, sizeof(ssid), sizeof(pass), i + 1))
+            {
+                SafeString::copy(credentials[i].ssid, ssid, sizeof(credentials[i].ssid));
+                SafeString::copy(credentials[i].password, pass, sizeof(credentials[i].password));
+                Serial.printf("[WiFi] ✓ Priority %d: %s (password hidden)\n", i + 1, ssid);
+            }
+            else
+            {
+                Serial.printf("[WiFi] ❌ Failed to load Priority %d credentials\n", i + 1);
+                return false;
+            }
+        }
+        
         numCredentials = 3;
         isInitiated = true;
-
-        Serial.println("[WiFi] 🛡️  Multi-WiFi Priority System Initialized (1 > 2 > 3)");
+        
+        Serial.println("[WiFi] ✅ Secure WiFi credentials loaded successfully");
         
         // Start connection from highest priority
         currentPriorityIndex = 0;
-        Serial.printf("[WiFi] Priority 1: %s\n", credentials[0].ssid);
-        Serial.printf("[WiFi] Priority 2: %s\n", credentials[1].ssid);
-        Serial.printf("[WiFi] Priority 3: %s\n", credentials[2].ssid);
-
         return attemptConnection(currentPriorityIndex);
     }
 

@@ -6,10 +6,12 @@
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
 #include "../../include/config/hardware.h"
+#include "../../include/utils/safe_serial.h"
 
 #include "../../include/ocpp/ocpp_client.h"
 #include "../../include/production_config.h"
 #include "../../include/secrets.h"
+#include "../../include/config/secure_config.h"
 #include "../../include/header.h"
 #include "../../include/modules/ota_manager.h"
 #include "../../include/ocpp_state_machine.h"
@@ -153,9 +155,28 @@ static prod::UnifiedConnection g_ocppConnection;
 bool ocpp::init()
 {
     Serial.println("[OCPP] 🔌 Initializing OCPP...");
-    Serial.printf("[OCPP] 📍 StationId: %s\n", SECRET_CHARGER_ID);
-    Serial.printf("[OCPP] 🌐 Base URL: %s\n", SECRET_CSMS_URL);
-    Serial.printf("[OCPP] 🔗 Full Connection URL: %s/%s\n", SECRET_CSMS_URL, SECRET_CHARGER_ID);
+
+    // Load dynamic config from secure storage
+    char chargerId[32] = {0}, csmsHost[128] = {0}, csmsUrl[256] = {0};
+    uint16_t csmsPort = 443;
+    
+    if (SecureConfig::getOCPPConfig(csmsHost, csmsPort, chargerId, csmsUrl,
+                                   sizeof(csmsHost), sizeof(chargerId), sizeof(csmsUrl)))
+    {
+        Serial.printf("[OCPP] 📍 StationId: %s\n", chargerId);
+        Serial.printf("[OCPP] 🌐 CSMS Host: %s:%d\n", csmsHost, csmsPort);
+        Serial.printf("[OCPP] 🔗 Full URL: %s/%s\n", csmsUrl, chargerId);
+        
+        // Configure the connection with real credentials
+        g_ocppConnection.setServer(csmsHost, csmsPort, chargerId);
+    }
+    else
+    {
+        Serial.println("[OCPP] ❌ Failed to load OCPP config from secure storage!");
+        Serial.println("[OCPP] ⚠️  Using fallback macros (may be SECURE_STORAGE placeholder)");
+        // Fallback to macros - will be SECURE_STORAGE placeholder if not migrated
+        g_ocppConnection.setServer(SECRET_CSMS_HOST, SECRET_CSMS_PORT, SECRET_CHARGER_ID);
+    }
 
     // Require network (GSM or WiFi) before initializing
     if (!prod::g_networkManager.isConnected())
@@ -170,11 +191,11 @@ bool ocpp::init()
     // NOTE: WiFiClientSecure uses WiFi DNS — skip when connected via GSM
     if (prod::g_networkManager.getActiveConnection() == prod::ConnectionType::WIFI) {
         Serial.println("[OCPP] 🔍 Testing TCP connectivity to server...");
-        Serial.printf("[OCPP] 🎯 Target: %s:%d\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
+        Serial.printf("[OCPP] 🎯 Target: %s:%d\n", csmsHost, csmsPort);
         
         WiFiClientSecure testClient;
         testClient.setCACert(ISRG_ROOT_X1_CERT);
-        bool serverReachable = testClient.connect(SECRET_CSMS_HOST, SECRET_CSMS_PORT, 10000);
+        bool serverReachable = testClient.connect(csmsHost, csmsPort, 10000);
         
         if (serverReachable) {
             Serial.println("[OCPP] ✅ TLS connection successful - server is reachable");
@@ -214,7 +235,7 @@ bool ocpp::init()
         // transport for GSM.
         mocpp_initialize(
             g_ocppConnection,
-            ChargerCredentials(SECRET_CHARGER_MODEL, SECRET_CHARGER_VENDOR),
+            ChargerCredentials(DEFAULT_CHARGER_MODEL, DEFAULT_CHARGER_VENDOR),
             MicroOcpp::makeDefaultFilesystemAdapter(MicroOcpp::FilesystemOpt::Use),
             true); // autoRecover
         Serial.println("[OCPP] ✅ mocpp_initialize() completed");
@@ -353,21 +374,16 @@ void ocpp::poll()
     // DIAGNOSTICS & HEALTH (EVERY 5S/10S)
     // ═══════════════════════════════════════════════════════════════
     static unsigned long lastHealthPoll = 0;
-    if (millis() - lastHealthPoll >= 5000) {
+    if (millis() - lastHealthPoll >= 30000) {
         lastHealthPoll = millis();
         bool healthy = isChargerModuleHealthy();
-        Serial.printf("[OCPP_HEALTH] Uptime: %lu ms | Healthy: %s | State: %s\n", 
-                      millis(), healthy ? "YES" : "NO", prod::g_ocppStateMachine.getStateName());
-    }
-
-    static unsigned long lastStatusLog = 0;
-    if (millis() - lastStatusLog >= 10000) {
-        lastStatusLog = millis();
         auto snap = state.snapshot();
-        Serial.printf("[OCPP] Status: SM=%s | Tx=%s | Charging=%s | Operative=%d\n",
+        SafeSerial::printf("[SYS] @%lums | SM=%s | Tx=%s | Chg=%s | Healthy=%s | Op=%d\n",
+                     millis(),
                      prod::g_ocppStateMachine.getStateName(),
                      snap.transactionActive ? "Active" : "Idle",
                      snap.chargingEnabled ? "ON" : "OFF",
+                     healthy ? "YES" : "NO",
                      isOperative());
     }
 
@@ -429,6 +445,11 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     if (model == 1) modelName = "Classic";
     else if (model == 2) modelName = "Pro";
     else if (model == 3) modelName = "Max";
+
+    if (!::gunPhysicallyConnected) {
+        Serial.println("[OCPP] ⚠️  Skip VehicleInfo: Gun not physically connected (waiting for BMS CAN)");
+        return;
+    }
 
     // VehicleInfo logging
     Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (Pre-Tx):\n");

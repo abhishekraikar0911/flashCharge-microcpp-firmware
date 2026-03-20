@@ -7,7 +7,8 @@
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
 #include <MicroOcpp/Model/ConnectorBase/Connector.h>
-#include "../include/secrets.h"
+// SECURITY FIX: Removed hardcoded secrets.h, using secure configuration
+#include "../include/config/secure_config.h"
 #include "../include/header.h"
 #include "../include/debug_logger.h"
 #include "../include/ocpp/ocpp_client.h"
@@ -23,6 +24,7 @@
 #include "../include/config/version.h"
 #include "../include/config/hardware.h"
 #include "../include/modules/hardware_service.h"
+#include "../include/utils/safe_serial.h"
 
 extern void processDebugCommand(char c);
 
@@ -78,9 +80,15 @@ void setup()
     // especially for GSM and CAN transceivers.
     delay(5000); 
 
-    // Visual heartbeat setup
-    pinMode(LED_WIFI, OUTPUT);
-    digitalWrite(LED_WIFI, HIGH); // On during boot
+    // Route MicroOcpp logs through SafeSerial to prevent line interleaving 
+    // Output often exceeds the 64-byte UART TX buffer, causing yields
+    mocpp_set_console_out([](const char* msg) { 
+        SafeSerial::print(msg); 
+    });
+
+    // Visual heartbeat setup (Now handled by HardwareService D15/D13)
+    // Removed legacy LED_WIFI
+
 
     // TEMPORARY: Aggressively disable ALL watchdog timers for verification testing
     // Step 1: Remove IDLE tasks from TWDT (they are added by default in ESP-IDF)
@@ -90,25 +98,39 @@ void setup()
     if (idle1) esp_task_wdt_delete(idle1);
     // Step 2: Deinit the TWDT entirely
     esp_task_wdt_deinit();
-    Serial.println("[System] ⚠️  ALL Watchdog Timers DISABLED (IDLE0, IDLE1, TWDT)");
+    Serial.println("[BOOT] ⚠️  ALL Watchdog Timers DISABLED (IDLE0, IDLE1, TWDT)");
     
     // Initialize health monitor (calls TWDT init internally, so keep commented for now)
     // g_healthMonitor.init(); 
     Serial.println("[System] 🛡️  Health Monitor / Watchdog DISABLED per user request");
 
-    Serial.println("\n========================================");
-    Serial.printf("  ESP32 OCPP EVSE Controller - v%s\n", FIRMWARE_VERSION);
-    Serial.println("  Production-Ready Edition");
-    Serial.printf("  Build: %s\n", BUILD_TIMESTAMP);
-    Serial.printf("  StationId: %s\n", SECRET_CHARGER_ID);
-    Serial.printf("  CSMS: %s:%d\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
-    Serial.println("========================================");
-    Serial.println("\n🔍 DEBUG: Configuration Verification");
-    Serial.printf("  CSMS_HOST = %s\n", SECRET_CSMS_HOST);
-    Serial.printf("  CSMS_PORT = %d\n", SECRET_CSMS_PORT);
-    Serial.printf("  CSMS_URL  = %s\n", SECRET_CSMS_URL);
-    Serial.printf("  CHARGER_ID = %s\n", SECRET_CHARGER_ID);
-    Serial.println("========================================\n");
+    // SECURITY FIX: Load configuration from secure storage instead of hardcoded values
+    char chargerId[32], csmsHost[128], csmsUrl[256];
+    uint16_t csmsPort;
+    
+    if (SecureConfig::getOCPPConfig(csmsHost, csmsPort, chargerId, csmsUrl, 
+                                   sizeof(csmsHost), sizeof(chargerId), sizeof(csmsUrl)))
+    {
+        Serial.println("\n========================================");
+        Serial.printf("  ESP32 OCPP EVSE Controller - v%s\n", FIRMWARE_VERSION);
+        Serial.println("  Production-Ready Edition (Secure)");
+        Serial.printf("  Build: %s\n", BUILD_TIMESTAMP);
+        Serial.printf("  StationId: %s\n", chargerId);
+        Serial.printf("  CSMS: %s:%d\n", csmsHost, csmsPort);
+        Serial.println("========================================");
+        Serial.println("\n🔐 SECURE: Configuration loaded from encrypted storage");
+        Serial.printf("  CSMS_HOST = %s\n", csmsHost);
+        Serial.printf("  CSMS_PORT = %d\n", csmsPort);
+        Serial.printf("  CSMS_URL  = %s\n", csmsUrl);
+        Serial.printf("  CHARGER_ID = %s\n", chargerId);
+        Serial.println("========================================\n");
+    }
+    else
+    {
+        Serial.println("\n❌ CRITICAL: Failed to load secure configuration!");
+        Serial.println("Device requires credential provisioning.");
+        Serial.println("========================================\n");
+    }
 
     // Log reset reason
     esp_reset_reason_t reset_reason = esp_reset_reason();
@@ -170,6 +192,27 @@ void setup()
         }
     }
 
+    // SECURITY FIX: Perform one-time credential migration from hardcoded secrets
+    Serial.println("[System] 🔐 Checking secure credential migration...");
+    if (!SecureConfig::isConfigured())
+    {
+        Serial.println("[System] 📦 First boot detected - migrating credentials to secure storage...");
+        if (SecureConfig::migrateFromLegacySecrets())
+        {
+            Serial.println("[System] ✅ Credential migration completed successfully");
+            Serial.println("[System] ⚠️  IMPORTANT: Remove secrets.h from version control!");
+        }
+        else
+        {
+            Serial.println("[System] ❌ CRITICAL: Credential migration failed!");
+            Serial.println("[System] Device may not function properly without credentials");
+        }
+    }
+    else
+    {
+        Serial.println("[System] ✅ Secure credentials already configured");
+    }
+
     // Clean stale transaction files from LittleFS dynamically
     Serial.println("[System] 🧹 Cleaning stuck transaction files...");
     if (LittleFS.begin(true)) {
@@ -204,10 +247,11 @@ void setup()
         Serial.printf("[System] Reboot count: %u\n", g_persistence.getRebootCount());
         g_persistence.recordRebootCount();
     }
-    // *** DIAGNOSTIC: Log time between reboots ***
+    // *** DIAGNOSTIC: Log time between reboots and heap memory ***
     static unsigned long lastLogged = 0;
     if (millis() - lastLogged > 5000 || lastLogged == 0) {
         Serial.printf("[DIAGNOSTIC] ⏱️  Reboot Safety Check: millis()=%lu, steady uptime since last boot\n", millis());
+        Serial.printf("[MEM] Free heap: %u bytes\n", ESP.getFreeHeap());
         lastLogged = millis();
     }
 
@@ -332,7 +376,7 @@ void setup()
     }
 
     // Initialize Network Manager (GSM primary, WiFi fallback)
-    Serial.println("[System] 📡 Initializing Network Manager (GSM → WiFi)...");
+    Serial.println("[BOOT] 📡 Initializing Network Manager (GSM → WiFi)...");
     prod::g_networkManager.init();
 
     // Create NETWORK_MGR task on Core 0 (priority 5)
@@ -361,11 +405,11 @@ void setup()
     }
 
     // Initialize security (TLS/WSS)
-    Serial.println("[System] 🔒 Initializing security...");
+    Serial.println("[BOOT] 🔒 Initializing security...");
     g_securityManager.init();
 
     // Initialize OTA manager
-    Serial.println("[System] 🔄 Initializing OTA...");
+    Serial.println("[BOOT] 🔄 Initializing OTA...");
     g_otaManager.init();
 
     // For production with valid SSL certificate, uncomment:
@@ -374,7 +418,7 @@ void setup()
     // g_securityManager.enableCertificateVerification();
     
     // For now, using setInsecure() to accept self-signed certificates
-    Serial.println("[System] ⚠️  Using insecure mode for WSS (accepts any certificate)");
+    Serial.println("[BOOT] ⚠️  Using insecure mode for WSS (accepts any certificate)");
 
     // NOTE: OCPP initialization now happens in ocppTask after WiFi is ready
     // This prevents the race condition that was causing crashes
@@ -386,7 +430,7 @@ void setup()
     // Initialize OCPP state machine
     g_ocppStateMachine.init();
 
-    Serial.println("[System] ✅ All systems initialized!\n");
+    Serial.println("[BOOT] ✅ All systems initialized!\n");
     
     // Initialize debug logger
     DebugLogger::init();
@@ -416,14 +460,8 @@ void loop()
 
     // ═══════════════════════════════════════════════════════════
     // Heartbeat / Autonomous Boot Indicator
+    // (Now handled by HardwareService pollStatusLEDs)
     // ═══════════════════════════════════════════════════════════
-    static unsigned long lastHeartbeatBlink = 0;
-    static bool heartbeatState = false;
-    if (millis() - lastHeartbeatBlink > 500) {
-        heartbeatState = !heartbeatState;
-        digitalWrite(LED_WIFI, heartbeatState);
-        lastHeartbeatBlink = millis();
-    }
 
     // FIX #5: Yield to prevent watchdog timeout
     vTaskDelay(pdMS_TO_TICKS(10));

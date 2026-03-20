@@ -115,24 +115,24 @@ void OcppMeterService::sendCompactTelemetry() {
     float i = snap.terminalCurr;
     float s = snap.socPercent;
     float e = snap.energyWh;
-    float t = snap.chargerTemp;
+    float p = snap.terminalVolt * snap.terminalCurr;
 
     sendRequest("DataTransfer",
-        [v, i, s, e, t]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
+        [v, i, s, e, p]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
             // Compact payload: ~80 bytes vs ~500 for full MeterValues
             auto doc = std::unique_ptr<MicroOcpp::JsonDoc>(new MicroOcpp::JsonDoc(256));
             JsonObject payload = doc->to<JsonObject>();
             payload["vendorId"] = "RivotMotors";
             payload["messageId"] = "LiveTelemetry";
 
-            // Compact data string: {"v":78.4,"i":9.6,"s":89.2,"e":1234.5,"t":35.0}
+            // Compact data string: {"v":78.4,"i":9.6,"s":89.2,"e":1234.5,"p":752.6}
             MicroOcpp::JsonDoc dataDoc(128);
             JsonObject dataObj = dataDoc.to<JsonObject>();
             dataObj["v"] = serialized(String(v, 1));  // Voltage (1 decimal)
             dataObj["i"] = serialized(String(i, 1));  // Current (1 decimal)
             dataObj["s"] = serialized(String(s, 1));  // SoC (1 decimal)
             dataObj["e"] = serialized(String(e, 1));  // Energy Wh (1 decimal)
-            dataObj["t"] = serialized(String(t, 1));  // Temperature (1 decimal)
+            dataObj["p"] = serialized(String(p, 1));  // Power W (1 decimal)
 
             String dataStr;
             serializeJson(dataObj, dataStr);

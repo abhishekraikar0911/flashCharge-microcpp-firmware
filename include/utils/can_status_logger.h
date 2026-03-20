@@ -2,11 +2,12 @@
 #define CAN_STATUS_LOGGER_H
 
 #include "utils/log_macros.h"
+#include "utils/safe_serial.h"
 #include "driver/twai.h"
 
 /**
  * @file can_status_logger.h
- * @brief Clean CAN bus status reporting
+ * @brief Clean CAN bus status reporting (single-line format)
  */
 
 namespace CANStatusLogger {
@@ -22,34 +23,20 @@ inline const char* getStateStr(twai_state_t state) {
     }
 }
 
-// Print formatted CAN status report
+// Single-line CAN1 status (replaces 12-line Unicode box)
 inline void printStatusReport(const twai_status_info_t& status) {
-    LOG_SECTION_START("CAN BUS 1 (CHARGER) STATUS");
-    
-    LOG_DATA("State", getStateStr(status.state));
-    LOG_DATA("TX Error Counter", status.tx_error_counter);
-    LOG_DATA("RX Error Counter", status.rx_error_counter);
-    LOG_DATA("TX Failed Count", status.tx_failed_count);
-    LOG_DATA("RX Missed Count", status.rx_missed_count);
-    LOG_DATA("Arbitration Lost", status.arb_lost_count);
-    LOG_DATA("Bus Error Count", status.bus_error_count);
-    LOG_DATA("TX Queue", status.msgs_to_tx);
-    LOG_DATA("RX Queue", status.msgs_to_rx);
-    
-    LOG_SECTION_END();
+    SafeSerial::printf("[CAN1] %s | TEC=%d REC=%d TxFail=%d RxMiss=%d ArbLost=%d BusErr=%d TxQ=%d RxQ=%d\n",
+        getStateStr(status.state),
+        status.tx_error_counter, status.rx_error_counter,
+        status.tx_failed_count, status.rx_missed_count,
+        status.arb_lost_count, status.bus_error_count,
+        status.msgs_to_tx, status.msgs_to_rx);
 }
 
-// Print formatted MCP2515 status report (CAN2)
+// Single-line CAN2 (BMS) status
 inline void printMCP2515Status(const char* state, uint8_t tec, uint8_t rec, uint32_t total_rx, uint32_t total_tx) {
-    LOG_SECTION_START("CAN BUS 2 (BMS) STATUS");
-    
-    LOG_DATA("State", state);
-    LOG_DATA("TX Error Counter", tec);
-    LOG_DATA("RX Error Counter", rec);
-    LOG_DATA("Total RX Success", total_rx);
-    LOG_DATA("Total TX Success", total_tx);
-    
-    LOG_SECTION_END();
+    SafeSerial::printf("[CAN2] %s | TEC=%d REC=%d RX=%lu TX=%lu\n",
+        state, tec, rec, total_rx, total_tx);
 }
 
 // Print diagnostic analysis

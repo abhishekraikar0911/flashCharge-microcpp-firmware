@@ -17,8 +17,8 @@ namespace prod
 {
 
     struct WiFiCredential {
-        const char* ssid;
-        const char* password;
+        char ssid[33];      // Changed from const char* to char array for secure storage
+        char password[64];  // Changed from const char* to char array for secure storage
     };
 
     class WiFiManager

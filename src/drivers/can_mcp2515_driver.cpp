@@ -270,22 +270,36 @@ namespace CAN_MCP2515
         return (millis() - driverStatus.last_activity_ms) < TIMEOUT_MS;
     }
 
-    static void decodeErrorFlags(uint8_t flags)
+    static void decodeErrorFlags(uint8_t flags, char* buf, size_t maxLen)
     {
-        if (flags == 0) return;
+        if (flags == 0) {
+            buf[0] = '\0';
+            return;
+        }
         
-        Serial.print(" [");
+        size_t pos = snprintf(buf, maxLen, " [");
         bool first = true;
-        if (flags & MCP2515::EFLG_RX1OVR) { Serial.print("RX1OVR"); first = false; }
-        if (flags & MCP2515::EFLG_RX0OVR) { if(!first) Serial.print("|"); Serial.print("RX0OVR"); first = false; }
-        if (flags & MCP2515::EFLG_TXBO)   { if(!first) Serial.print("|"); Serial.print("Bus-Off"); first = false; }
-        if (flags & MCP2515::EFLG_TXEP)   { if(!first) Serial.print("|"); Serial.print("TX-Passive"); first = false; }
-        if (flags & MCP2515::EFLG_RXEP)   { if(!first) Serial.print("|"); Serial.print("RX-Passive"); first = false; }
-        if (flags & MCP2515::EFLG_TXWAR)  { if(!first) Serial.print("|"); Serial.print("TX-Warn"); first = false; }
-        if (flags & MCP2515::EFLG_RXWAR)  { if(!first) Serial.print("|"); Serial.print("RX-Warn"); first = false; }
-        // Note: EFLG_EWAR is often missing in older lib versions, using bit 0 directly if needed
-        if (flags & 0x01) { if(!first) Serial.print("|"); Serial.print("Error-Warn"); first = false; }
-        Serial.print("]");
+        
+        auto appendFlag = [&](const char* name) {
+            if (!first && pos < maxLen) {
+                pos += snprintf(buf + pos, maxLen - pos, "|");
+            }
+            if (pos < maxLen) {
+                pos += snprintf(buf + pos, maxLen - pos, "%s", name);
+            }
+            first = false;
+        };
+
+        if (flags & MCP2515::EFLG_RX1OVR) appendFlag("RX1OVR");
+        if (flags & MCP2515::EFLG_RX0OVR) appendFlag("RX0OVR");
+        if (flags & MCP2515::EFLG_TXBO)   appendFlag("Bus-Off");
+        if (flags & MCP2515::EFLG_TXEP)   appendFlag("TX-Passive");
+        if (flags & MCP2515::EFLG_RXEP)   appendFlag("RX-Passive");
+        if (flags & MCP2515::EFLG_TXWAR)  appendFlag("TX-Warn");
+        if (flags & MCP2515::EFLG_RXWAR)  appendFlag("RX-Warn");
+        if (flags & 0x01)                 appendFlag("Error-Warn");
+        
+        if (pos < maxLen) snprintf(buf + pos, maxLen - pos, "]");
     }
 
     bool readDiagnostics()
@@ -314,23 +328,22 @@ namespace CAN_MCP2515
             driverStatus.total_tx_messages
         );
 
-        Serial.printf("[CAN2] EFLG (0x%02X):", eflg);
-        decodeErrorFlags(eflg);
-        Serial.println();
+        char eflgStr[100];
+        decodeErrorFlags(eflg, eflgStr, sizeof(eflgStr));
+        SafeSerial::printf("[CAN2] EFLG (0x%02X):%s\n", eflg, eflgStr);
         
         // Read interrupt flags
         uint8_t canintf = mcp2515->getInterrupts();
-        Serial.printf("CANINTF: 0x%02X\n", canintf);
+        SafeSerial::printf("[CAN2] CANINTF: 0x%02X\n", canintf);
         
         // Check if SPI communication is working
         bool spiOk = (eflg != 0xFF && canintf != 0xFF);
-        Serial.printf("SPI Communication: %s\n", spiOk ? "✅ OK" : "❌ FAILED");
+        SafeSerial::printf("[CAN2] SPI Communication: %s\n", spiOk ? "✅ OK" : "❌ FAILED");
         
         // Status
         uint8_t status = mcp2515->getStatus();
-        Serial.printf("MCP Status: 0x%02X\n", status);
-        
-        Serial.println("================================");
+        SafeSerial::printf("[CAN2] MCP Status: 0x%02X\n", status);
+        SafeSerial::println("================================");
         
         return spiOk;
     }
@@ -353,6 +366,13 @@ void can2_rx_task(void *arg)
 
     while (true)
     {
+        // PERIODIC DIAGNOSTIC: Log status every 30s if idle
+        static unsigned long lastAliveLog = 0;
+        if (millis() - lastAliveLog > 30000) {
+            SafeSerial::println("[CAN2] 🔍 Driver Alive - Waiting for BMS messages...");
+            lastAliveLog = millis();
+        }
+
         // Take mutex before accessing MCP2515
         if (mcp2515RecoveryMutex && xSemaphoreTake(mcp2515RecoveryMutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
@@ -409,6 +429,16 @@ void can2_rx_task(void *arg)
                         continue; 
                     }
 
+                    // Clear EFLG if we were previously holding errors but are now successfully receiving
+                    if (driverStatus.error_count > 0 || mcp2515->getErrorFlags() != 0) {
+                        mcp2515->clearRXnOVRFlags();
+                        mcp2515->clearMERR();
+                        mcp2515->clearERRIF();
+                        // Reset error tracking since we got a valid BMS packet
+                        driverStatus.error_count = 0;
+                        SafeSerial::println("[CAN2] ✅ Valid BMS message received — error flags cleared");
+                    }
+
                     // Check buffer overflow
                     uint16_t nextHead = (rxHead + 1) % MCP2515_RX_BUFFER_SIZE;
                     if (nextHead != rxTail)
@@ -451,9 +481,10 @@ void can2_rx_task(void *arg)
                         {
                             uint8_t tec = mcp2515->errorCountTX();
                             uint8_t rec = mcp2515->errorCountRX();
-                            Serial.printf("[CAN2] ⚠️  Bus error: 0x%02X", errorFlags);
-                            CAN_MCP2515::decodeErrorFlags(errorFlags);
-                            Serial.printf(" (TEC: %d, REC: %d)\n", tec, rec);
+                            char eflgStr[100];
+                            CAN_MCP2515::decodeErrorFlags(errorFlags, eflgStr, sizeof(eflgStr));
+                            SafeSerial::printf("[CAN2] ⚠️  Bus error: 0x%02X%s (TEC: %d, REC: %d)\n", 
+                                               errorFlags, eflgStr, tec, rec);
                             
                             // Automatically dump full diagnostics to help find the physical cause
                             CAN_MCP2515::readDiagnostics();

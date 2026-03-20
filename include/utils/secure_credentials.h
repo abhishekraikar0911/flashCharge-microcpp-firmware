@@ -168,8 +168,6 @@ namespace SecureCredentials
         }
     };
 
-    const char *Manager::NAMESPACE = "secure_cred";
-
     // Global instance
     extern Manager g_secureCredentials;
 

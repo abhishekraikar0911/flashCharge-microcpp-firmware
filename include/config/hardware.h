@@ -42,22 +42,28 @@
 // GSM Timing Configuration
 #define GSM_RESET_PULSE_MS      2500   // Active-HIGH reset pulse duration
 #define GSM_AT_TIMEOUT_MS       30000  // AT command watchdog timeout
-#define GSM_CONNECT_TIMEOUT_MS  60000  // Network registration timeout
-#define GSM_MAX_RETRIES         3      // Retries before WiFi fallback
-#define GSM_RECHECK_INTERVAL_MS 120000 // Retry GSM every 2 min while on WiFi
+#define GSM_CONNECT_TIMEOUT_MS  60000  // Network registration timeout (Idle)
+#define GSM_MAX_RETRIES         3      // Retries before WiFi fallback (Idle)
+
+// Industrial Charging Fallback (Fast-failover)
+#define GSM_CHARGING_CONNECT_TIMEOUT_MS 20000 // 20s registration wait during Tx
+#define GSM_CHARGING_MAX_RETRIES        1     // Only 1 retry before WiFi during Tx
+#define COMM_LOSS_TIMEOUT_MS            120000 // 120s Comm Loss -> Emergency Stop (was 30s)
+
+#define GSM_RECHECK_INTERVAL_MS 300000 // Retry GSM every 5 min while on WiFi (was 10min)
 #define GSM_CIPSTATUS_INTERVAL  30000  // AT+CIPSTATUS check interval
-#define GSM_WS_IDLE_TIMEOUT_MS  120000 // WebSocket idle watchdog (120s)
+#define GSM_WS_IDLE_TIMEOUT_MS  60000  // FIX E: Reduced from 90s to 60s — detect dead socket faster
 
 // ========== LED AND INTERFACE CONFIGURATION ==========
-#define LED_WIFI          32         // Status LED 1: Network/WiFi
-#define LED_AVAIL         33         // Status LED 2: Availability/Charging
-#define BTN_ESTOP         34         // Emergency Stop (Active LOW)
-#define BTN_REBOOT        35         // System Reboot (Active LOW)
+#define LED_CHARGER_STATUS     13         // D13: Green/Yellow Charger Status
+#define LED_NETWORK_STATUS     15         // D15: Blue/White Network Status
+#define BTN_ESTOP              32         // Emergency Stop (Active LOW) - MOVED to 32
+#define BTN_REBOOT             35         // System Reboot (Active LOW)
 
 // ========== SAFETY LIMITS ==========
 #define MIN_VOLTAGE_V 56.0f
-#define MAX_VOLTAGE_V 102.0f  // Increased from 95V to accommodate transients
-#define MAX_CURRENT_A 110.0f
+#define MAX_VOLTAGE_V 86.0f  // Increased from 95V to accommodate transients
+#define MAX_CURRENT_A 100.0f
 #define MAX_TEMPERATURE_C 95.0f
 #define BATTERY_CAPACITY_AH 30.0f
 
@@ -65,7 +71,7 @@
 #define ALERT_TEMP_WARNING_C 70.0f
 #define ALERT_TEMP_CRITICAL_C 70.0f
 #define ALERT_VOLTAGE_MIN_V 56.0f
-#define ALERT_VOLTAGE_MAX_V 102.0f  // Increased from 95V to accommodate transients
+#define ALERT_VOLTAGE_MAX_V 84.0f  // Increased from 95V to accommodate transients
 #define ALERT_CURRENT_MAX_A 100.0f
 
 // ========== FAULT STABILIZATION ==========

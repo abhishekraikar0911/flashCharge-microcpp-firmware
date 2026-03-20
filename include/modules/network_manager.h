@@ -16,6 +16,7 @@
  */
 
 #include <Arduino.h>
+#include "gsm_manager.h"
 
 namespace prod {
 
@@ -90,7 +91,7 @@ namespace prod {
 
     private:
         // ── Connection Attempts ──
-        bool attemptGSM();
+        GsmError attemptGSM();
         bool attemptWiFi();
 
         // ── GSM Recheck ──

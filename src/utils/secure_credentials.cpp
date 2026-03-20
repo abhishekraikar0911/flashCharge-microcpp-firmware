@@ -2,5 +2,6 @@
 
 namespace SecureCredentials
 {
+    const char *Manager::NAMESPACE = "secure_cred";
     Manager g_secureCredentials;
 }

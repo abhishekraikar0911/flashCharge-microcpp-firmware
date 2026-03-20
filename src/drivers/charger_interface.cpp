@@ -449,7 +449,7 @@ void chargerCommTask(void *arg)
         
         // Print status every 10 seconds
         static unsigned long lastStatusPrint = 0;
-        if (millis() - lastStatusPrint > 10000) {
+        if (millis() - lastStatusPrint > 30000) {
             if (status_result == ESP_OK) {
                 CANStatusLogger::printStatusReport(s);
             } else {
@@ -574,8 +574,8 @@ void chargerCommTask(void *arg)
         }
         */
 
-        // Send charger feedback
-        if (millis() - lastFeedback >= 100)
+        // Send charger feedback (1s broadcast as per protocol V1.0)
+        if (millis() - lastFeedback >= 1000)
         {
             sendChargerFeedback();
             lastFeedback = millis();

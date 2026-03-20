@@ -43,9 +43,9 @@ namespace prod
         else
         {
             // No persisted transaction - check battery status for initial state
-            if (batteryConnected)
+            if (batteryConnected && terminalVolt > 20.0f)
             {
-                // Battery connected → start in PREPARING state
+                // Battery connected AND voltage plausible → start in PREPARING state
                 Serial.println("[OCPP_SM] 🔋 Battery is connected on startup - Starting in PREPARING state");
                 currentState = ConnectorState::Preparing;
             }
@@ -195,8 +195,8 @@ namespace prod
             // Timeout: Force transition to Available - ONLY if vehicle has unplugged
             // If vehicle is still connected, stay in Finishing and wait for physical disconnect
             if (!isPlugConnected() && !batteryConnected) {
-                Serial.printf("[OCPP_SM] ⏱️  Finishing timeout (%.0f sec) - vehicle gone, transitioning to Available\n",
-                              FINISHING_TIMEOUT_MS / 1000.0f);
+                Serial.printf("[OCPP_SM] @%lums Finishing timeout (%.0f sec) - vehicle gone, transitioning to Available\n",
+                              millis(), FINISHING_TIMEOUT_MS / 1000.0f);
                 forceState(ConnectorState::Available);
                 g_persistence.clearTransaction();
                 g_healthMonitor.onTransactionEnded();
@@ -256,10 +256,10 @@ namespace prod
         // the session is over but the vehicle is still connected.
         // The poll() timeout will handle the Finishing → Available transition.
         if (isPlugConnected() || batteryConnected) {
-            Serial.println("[OCPP_SM] 🔌 Vehicle still connected - transitioning to FINISHING");
+            Serial.printf("[OCPP_SM] @%lums Vehicle still connected - transitioning to FINISHING\n", millis());
             forceState(ConnectorState::Finishing);
         } else {
-            Serial.println("[OCPP_SM] 🔌 Vehicle disconnected - transitioning to AVAILABLE");
+            Serial.printf("[OCPP_SM] @%lums Vehicle disconnected - transitioning to AVAILABLE\n", millis());
             forceState(ConnectorState::Available);
         }
 
@@ -324,7 +324,7 @@ namespace prod
 
     bool OCPPStateMachine::onRemoteStopTransaction(int transactionId)
     {
-        Serial.printf("[OCPP_SM] 📤 RemoteStopTransaction: %d (currentState=%s)\n", transactionId, getStateName());
+        Serial.printf("[STATE] 📤 RemoteStopTransaction: %d (currentState=%s)\n", transactionId, getStateName());
 
         // ROBUST STOP: Accept RemoteStop if we are in any active or "stuck" state
         // This helps recover when server and client are out of sync on transaction IDs
@@ -426,7 +426,7 @@ namespace prod
             return;
         }
 
-        Serial.printf("[OCPP_SM] 🔄 State: %s → %s ✅ TRANSITION APPLIED\n", oldStateName, newStateName);
+        Serial.printf("[OCPP_SM] @%lums State: %s → %s ✅\n", millis(), oldStateName, newStateName);
 
         currentState = newState;
         stateEnterTime = millis();

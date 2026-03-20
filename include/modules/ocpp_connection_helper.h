@@ -29,6 +29,9 @@ namespace prod {
         UnifiedConnection();
         virtual ~UnifiedConnection();
 
+        // ── Dynamic Server Configuration ──
+        void setServer(const char* host, uint16_t port, const char* chargerId);
+
         // ── MicroOcpp::Connection Interface ──
         void loop() override;
         bool sendTXT(const char *msg, size_t length) override;
@@ -53,9 +56,16 @@ namespace prod {
         unsigned long _lastRecv = 0;
         unsigned long _lastConnected = 0;
         
+        // ── Dynamic Server Config ──
+        char _serverHost[128] = {0};
+        uint16_t _serverPort = 443;
+        char _chargerId[32] = {0};
+        bool _serverConfigured = false;
+
         // ── GSM Socket State ──
         bool _gsmWsConnected = false;
         uint32_t _lastGsmPing = 0;
+        uint32_t _lastConnectAttempt = 0;
         SSLClient* _sslClient = nullptr;
     };
 

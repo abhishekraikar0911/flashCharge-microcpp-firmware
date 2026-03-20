@@ -36,6 +36,16 @@ namespace prod {
     };
 
     /**
+     * @brief Detailed error codes for connection attempts
+     */
+    enum class GsmError : uint8_t {
+        SUCCESS = 0,
+        FAIL_RETRYABLE,     // Signal low, timeout, etc.
+        FAIL_FATAL_NO_SIM,  // SIM pulled/missing
+        FAIL_FATAL_MODEM    // Modem hardware not responding
+    };
+
+    /**
      * @brief Returns a human-readable string for the GSM state
      */
     const char* gsmStateToString(GSMState state);
@@ -52,9 +62,10 @@ namespace prod {
 
         /**
          * @brief Attempt to bring the modem up through all states to CONNECTED.
-         * @return true if modem reached CONNECTED state
+         * @param networkTimeoutMs Timeout for network registration (Step 4/6)
+         * @return GsmError indicating success or the specific cause of failure
          */
-        bool connect();
+        GsmError connect(uint32_t networkTimeoutMs = 60000);
 
         /**
          * @brief Disconnect and power down the modem gracefully.
@@ -107,7 +118,7 @@ namespace prod {
         bool stepBoot();
         bool stepModemReady();
         bool stepSimReady();
-        bool stepNetworkRegistered();
+        bool stepNetworkRegistered(uint32_t timeoutMs = 60000);
         bool stepDataAttached();
         bool stepIpReady();
 

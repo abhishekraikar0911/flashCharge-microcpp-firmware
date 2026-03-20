@@ -33,7 +33,7 @@ void OcppTransactionManager::registerConnectorInputs() {
         return isChargerModuleHealthy();
     });
 
-    Serial.println("[TX_MGR] ✓ Connector inputs registered (Plug, EvReady, EvseReady)");
+    Serial.println("[OCPP] ✓ Connector inputs registered (Plug, EvReady, EvseReady)");
 }
 
 bool OcppTransactionManager::validateRemoteStart(const char* idTag) {
@@ -101,13 +101,21 @@ void OcppTransactionManager::handleStartTx(MicroOcpp::Transaction* tx) {
     auto& state = SystemState::instance();
     int txId = tx ? tx->getTransactionId() : -1;
     
+    // CRITICAL FIX: Reset session energy at the start of a transaction
+    // This ensures MeterValues and LiveTelemetry start from 0 for the new session
+    state.setEnergyWh(0.0f);
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ::energyWh = 0.0f;
+        xSemaphoreGive(dataMutex);
+    }
+
     state.setActiveTransactionId(txId);
     state.setTransactionActive(true);
     state.setChargingEnabled(true);
     state.setTxStartTime(millis());
     _stopTxPending = false; // New session starts, clear guard
 
-    Serial.printf("[TX_MGR] ▶️  Transaction STARTED: txId=%d\n", txId);
+    Serial.printf("[TX_MGR] ▶️  Transaction STARTED: txId=%d (Energy reset to 0)\n", txId);
     
     g_ocppStateMachine.onTransactionStarted(1, "RemoteStart", txId);
 }

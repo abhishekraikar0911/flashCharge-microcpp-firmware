@@ -23,11 +23,24 @@ HardwareService g_hardwareService;
 
 void HardwareService::begin() {
     _lastEnergyTime = millis();
+    
+    // Initialize Status LEDs
+    pinMode(LED_CHARGER_STATUS, OUTPUT);
+    pinMode(LED_NETWORK_STATUS, OUTPUT);
+    digitalWrite(LED_CHARGER_STATUS, LOW);
+    digitalWrite(LED_NETWORK_STATUS, LOW);
+
+    // Initialize E-Stop (Internal Pull-up for NC button)
+    pinMode(BTN_ESTOP, INPUT_PULLUP);
+    
+    _lastNetworkTime = millis();
+    
     Serial.println("[HW_SVC] Hardware monitoring service started");
 }
 
 void HardwareService::poll() {
     auto snap = SystemState::instance().snapshot();
+    pollEStop(snap);
     pollPlugDetection(snap);
     pollSafetyMonitor(snap);
     pollEnergyAccumulation(snap);
@@ -36,6 +49,7 @@ void HardwareService::poll() {
     pollWiFiMonitor();
     pollVehicleInfo(snap);
     pollPostTxVehicleInfo(snap);
+    pollStatusLEDs();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -91,7 +105,7 @@ void HardwareService::pollPlugDetection(const StateSnapshot& snap) {
         batteryConnected = false;
         Serial.println("[PLUG] ✅ Status: DISCONNECTED");
 
-        if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
+        if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
             Serial.printf("[PLUG] 🛑 Stopping transaction due to EV disconnect (txId=%d)\n", activeTransactionId);
             ocpp::endTransactionSafe(nullptr, "EVDisconnected");
         }
@@ -110,10 +124,86 @@ void HardwareService::pollPlugDetection(const StateSnapshot& snap) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 2b. EMERGENCY STOP BUTTON (Push-to-Off / Normally Closed)
+// ═══════════════════════════════════════════════════════════════
+
+void HardwareService::pollEStop(const StateSnapshot& snap) {
+    // NC Button: Normal = LOW (connected to GND), Pushed/Cut = HIGH (Pulled up)
+    bool estopPushed = (digitalRead(BTN_ESTOP) == HIGH);
+
+    if (estopPushed && !_estopActive) {
+        Serial.println("[SAFETY] 🚨 EMERGENCY STOP BUTTON PUSHED (Hardware Action)");
+        
+        // 1. FAST: Immediate hardware stop (bypass dataMutex to guarantee speed)
+        sendImmediateChargerStop();
+        
+        // Ensure flag is set so other logic knows charging must stop
+        chargingEnabled = false;
+        SystemState::instance().setChargingEnabled(false);
+
+        // Set fault lock immediately
+        faultLockActive = true;
+        faultLockTime = millis();
+
+        _estopActive = true;
+        // Schedule slow network notifications for later
+        _pendingEStopNotification = true; 
+    } 
+    else if (!estopPushed && _estopActive) {
+        Serial.println("[SAFETY] ✅ Emergency Stop Button released");
+        _estopActive = false;
+        // System remains in faultLock until stabilization period ends
+    }
+
+    // 2. SLOW: Handle network notifications asynchronously to prevent button delay
+    if (_pendingEStopNotification) {
+        // Attempt to get the lock without blocking forever. 
+        // If we fail, we'll try again next loop.
+        if (ocpp::lock(10)) { 
+            Serial.println("[SAFETY] 📡 Processing pending E-Stop OCPP notifications...");
+            ocpp::sendSystemAlert("EMERGENCY_STOP", "Physical E-Stop button pushed", "Critical");
+            
+            if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
+                ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+            }
+            
+            _pendingEStopNotification = false; // Successfully notified
+            ocpp::unlock();
+        } else {
+            // Couldn't get lock instantly, will retry on next poll
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 2. SAFETY MONITOR (BMS, Temperature, Voltage, Current)
 // ═══════════════════════════════════════════════════════════════
 
 void HardwareService::pollSafetyMonitor(const StateSnapshot& snap) {
+    // --- BMS Communication Timeout (5s per Protocol V1.0) ---
+    if (snap.transactionActive && (millis() - snap.lastBMS > 5000)) {
+        static unsigned long lastTimeoutPrint = 0;
+        if (millis() - lastTimeoutPrint > 2000) {
+            Serial.printf("[SAFETY] 🚨 BMS COMM TIMEOUT: No data for %lu ms\n", millis() - snap.lastBMS);
+            lastTimeoutPrint = millis();
+        }
+        
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            chargingEnabled = false;
+            SystemState::instance().setChargingEnabled(false);
+            xSemaphoreGive(dataMutex);
+        }
+        sendImmediateChargerStop();
+        
+        // This is a critical safety failure during transaction
+        if (ocpp::isTransactionRunningSafe(1)) {
+            faultLockActive = true;
+            faultLockTime = millis();
+            ocpp::sendBMSAlert("BMS_TIMEOUT", "BMS communication lost during transaction");
+            ocpp::endTransactionSafe(nullptr, "NoAuthorized"); // Use "NoAuthorized" or "Other" for protocol stop
+        }
+    }
+
     // --- BMS Safety ---
     if (millis() - _lastBmsSafetyCheck >= 100) {
         if (snap.bmsSafeToCharge != _lastBmsSafe) {
@@ -162,13 +252,18 @@ void HardwareService::pollSafetyMonitor(const StateSnapshot& snap) {
     // --- Voltage/Current (Summary) ---
     if (snap.terminalVolt > 0.0f && snap.batteryConnected) {
         if ((snap.terminalVolt > ALERT_VOLTAGE_MAX_V || snap.terminalVolt < ALERT_VOLTAGE_MIN_V) && !_voltageAlertActive) {
-            Serial.printf("[VOLTAGE] 🚨 Fault: %.1fV\n", snap.terminalVolt);
-            if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
-                faultLockActive = true;
-                faultLockTime = millis();
-                ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+            // CRITICAL FIX: Only trigger low voltage fault if we're actively expecting voltage (charging)
+            if (snap.terminalVolt < ALERT_VOLTAGE_MIN_V && !snap.chargingEnabled && !snap.transactionActive) {
+                // Ignore low voltage when not charging (e.g. after StopTransaction when contactor opens)
+            } else {
+                Serial.printf("[VOLTAGE] 🚨 Fault: %.1fV\n", snap.terminalVolt);
+                if (transactionActive && ocpp::isTransactionRunningSafe(1)) {
+                    faultLockActive = true;
+                    faultLockTime = millis();
+                    ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+                }
+                _voltageAlertActive = true;
             }
-            _voltageAlertActive = true;
         } else if (snap.terminalVolt >= MIN_VOLTAGE_V && snap.terminalVolt <= MAX_VOLTAGE_V && _voltageAlertActive) {
             _voltageAlertActive = false;
         }
@@ -180,7 +275,7 @@ void HardwareService::pollSafetyMonitor(const StateSnapshot& snap) {
 // ═══════════════════════════════════════════════════════════════
 
 void HardwareService::pollEnergyAccumulation(const StateSnapshot& snap) {
-    bool canCharge = (ocpp::ocppPermitsChargeSafe(1) && transactionActive && snap.chargingEnabled);
+    bool canCharge = (ocpp::ocppPermitsChargeSafe(1) && snap.transactionActive && snap.chargingEnabled);
     
     if (_lastChargingEnabled && !canCharge) {
         _lastChargingStopTime = millis();
@@ -193,6 +288,11 @@ void HardwareService::pollEnergyAccumulation(const StateSnapshot& snap) {
         float energyDelta = snap.terminalVolt * snap.terminalCurr * dt_hours;
 
         if (energyDelta > 0.0f && energyDelta < 1000.0f) {
+            // CRITICAL FIX: Update the centralized SystemState energy accumulator
+            // This ensures MeterValues and StopTransaction get the correct value
+            SystemState::instance().addEnergyWh(energyDelta);
+            
+            // Legacy/local update
             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 energyWh += energyDelta;
                 xSemaphoreGive(dataMutex);
@@ -234,6 +334,9 @@ void HardwareService::pollFaultLock(const StateSnapshot& snap) {
     if (!faultLockActive) return;
     if ((millis() - faultLockTime) < FAULT_STABILIZATION_PERIOD_MS) return;
 
+    // CRITICAL: Do not clear fault lock if E-Stop is still physically pushed
+    if (_estopActive) return;
+
     if (snap.bmsSafeToCharge && snap.terminalVolt >= ALERT_VOLTAGE_MIN_V && snap.chargerTemp <= ALERT_TEMP_CRITICAL_C) {
         Serial.println("[FAULT] ✅ Stability recovered, lock cleared");
         faultLockActive = false;
@@ -246,6 +349,28 @@ void HardwareService::pollFaultLock(const StateSnapshot& snap) {
 
 void HardwareService::pollWiFiMonitor() {
     bool networkConnected = g_networkManager.isConnected();
+    auto snap = SystemState::instance().snapshot();
+
+    if (networkConnected) {
+        _lastNetworkTime = millis();
+        _commLossTriggered = false; // Reset when network is back
+    } else if (snap.transactionActive && !_commLossTriggered) {
+        // Only trigger safety stop if we are actively charging
+        if (millis() - _lastNetworkTime > COMM_LOSS_TIMEOUT_MS) {
+            Serial.printf("[SAFETY] 🚨 COMM LOSS: Emergency Stop triggered after %ds outage during transaction\n", 
+                          (int)(COMM_LOSS_TIMEOUT_MS / 1000));
+            
+            // 1. Inform OCPP system (will be buffered in Flash)
+            ocpp::sendSystemAlert("COMMUNICATION_LOST", "Charging stopped due to 30s network outage", "Critical");
+            
+            // 2. End transaction locally
+            ocpp::endTransactionSafe(nullptr, "Local");
+            
+            // 3. Prevent multiple triggers for the same outage
+            _commLossTriggered = true;
+        }
+    }
+
     if (networkConnected != _lastWifiConnected) {
         _lastWifiConnected = networkConnected;
     }
@@ -265,7 +390,7 @@ void HardwareService::pollVehicleInfo(const StateSnapshot& snap) {
         snap.socPercent > 0.0f
     );
 
-    if (millis() - _lastVehicleDiag > 10000 && snap.gunPhysicallyConnected) {
+    if (millis() - _lastVehicleDiag > 30000 && snap.gunPhysicallyConnected) {
         _lastVehicleDiag = millis();
         Serial.printf("[VEHICLE_DIAG] shouldSend=%d (Imax=%.1f V=%.1f SOC=%.1f)\n",
                       shouldSendVehicleInfo, snap.BMS_Imax, snap.terminalVolt, snap.socPercent);
@@ -294,7 +419,7 @@ void HardwareService::pollVehicleInfo(const StateSnapshot& snap) {
             }
         }
     } else {
-        if (transactionActive || ocpp::isTransactionRunningSafe(1) || !batteryConnected) {
+        if (snap.transactionActive || ocpp::isTransactionRunningSafe(1) || !batteryConnected) {
             _lastVehicleInfoSent = 0;
             _firstSendDone = false;
         }
@@ -306,7 +431,7 @@ void HardwareService::pollVehicleInfo(const StateSnapshot& snap) {
 // ═══════════════════════════════════════════════════════════════
 
 void HardwareService::pollPostTxVehicleInfo(const StateSnapshot& snap) {
-    if (txStopTime > 0 && !transactionActive) {
+    if (txStopTime > 0 && !snap.transactionActive) {
         _sessionEverCompleted = true;
     }
 
@@ -330,5 +455,56 @@ void HardwareService::pollPostTxVehicleInfo(const StateSnapshot& snap) {
         }
     } else {
         _lastPostTxVehicleInfo = 0;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 9. STATUS LEDS (D13 & D15)
+// ═══════════════════════════════════════════════════════════════
+
+void HardwareService::pollStatusLEDs() {
+    unsigned long now = millis();
+    
+    // Check if we need to toggle blinking state (every 500ms)
+    bool blinkToggle = false;
+    if (now - _lastLedBlinkTime >= 500) {
+        _chargerLedState = !_chargerLedState;
+        _networkLedState = !_networkLedState;
+        _lastLedBlinkTime = now;
+        blinkToggle = true;
+    }
+
+    // --- 1. LED_NETWORK_STATUS (D15 - Blue/White) ---
+    // Steady ON if GSM/WiFi has no internet.
+    // Blinking if connected and online.
+    if (g_networkManager.isConnected()) {
+        if (blinkToggle) digitalWrite(LED_NETWORK_STATUS, _networkLedState ? HIGH : LOW);
+    } else {
+        digitalWrite(LED_NETWORK_STATUS, HIGH); // Steady ON = No network
+    }
+
+    // --- 2. LED_CHARGER_STATUS (D13 - Green/Yellow) ---
+    // Steady ON if Available or Finishing.
+    // Blinking if Charging.
+    // OFF if Faulted.
+    auto currentState = prod::g_ocppStateMachine.getState();
+    
+    if (currentState == prod::ConnectorState::Charging) {
+        // Blinking = Charging
+        if (blinkToggle) digitalWrite(LED_CHARGER_STATUS, _chargerLedState ? HIGH : LOW);
+    } 
+    else if (currentState == prod::ConnectorState::Available || 
+             currentState == prod::ConnectorState::Finishing || 
+             currentState == prod::ConnectorState::Preparing) {
+        // Steady ON = Available/Ready
+        digitalWrite(LED_CHARGER_STATUS, HIGH);
+    } 
+    else if (currentState == prod::ConnectorState::Faulted || !isChargerModuleHealthy()) {
+        // OFF = Faulted/Unavailable
+        digitalWrite(LED_CHARGER_STATUS, LOW);
+    }
+    else {
+        // Default (Suspended, etc) -> Keep steady ON
+        digitalWrite(LED_CHARGER_STATUS, HIGH);
     }
 }

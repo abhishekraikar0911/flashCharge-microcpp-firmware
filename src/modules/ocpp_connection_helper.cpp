@@ -10,6 +10,7 @@
 
 #include "../../include/modules/ocpp_connection_helper.h"
 #include "../../include/secrets.h"
+#include "../../include/utils/safe_serial.h"
 #include <Arduino.h>
 
 namespace prod {
@@ -27,6 +28,28 @@ namespace prod {
         if (_sslClient) delete _sslClient;
     }
 
+    void UnifiedConnection::setServer(const char* host, uint16_t port, const char* chargerId) {
+        strncpy(_serverHost, host, sizeof(_serverHost) - 1);
+        _serverHost[sizeof(_serverHost) - 1] = '\0';
+        _serverPort = port;
+        strncpy(_chargerId, chargerId, sizeof(_chargerId) - 1);
+        _chargerId[sizeof(_chargerId) - 1] = '\0';
+        _serverConfigured = true;
+        Serial.printf("[WS_GSM] 🎯 Server configured: %s:%d (ID: %s)\n", _serverHost, _serverPort, _chargerId);
+
+        // CRITICAL FIX: Initialize WiFi WebSocketsClient here
+        if (_wifiWS) {
+            char url[256];
+            snprintf(url, sizeof(url), "/ocpp16/%s", _chargerId);
+            // FIX A: Use beginSslWithCA(NULL) to explicitly bypass certificate validation.
+            // beginSSL() with empty string still validates against an empty bundle and fails.
+            // NULL CA cert = insecure/skip-validation mode in this library version.
+            _wifiWS->beginSslWithCA(_serverHost, _serverPort, url, (const char*)nullptr, "ocpp1.6");
+            _wifiWS->setReconnectInterval(5000);
+            Serial.printf("[WS_WIFI] 🎯 WiFi WS configured (insecure SSL): %s:%d%s\n", _serverHost, _serverPort, url);
+        }
+    }
+
     void UnifiedConnection::setReceiveTXTcallback(MicroOcpp::ReceiveTXTcallback &callback) {
         _receiveCallback = callback;
         _wifiConn->setReceiveTXTcallback(callback);
@@ -34,23 +57,26 @@ namespace prod {
 
     void UnifiedConnection::loop() {
         static uint32_t lastLoopLog = 0;
-        if (millis() - lastLoopLog >= 10000) {
+        if (millis() - lastLoopLog >= 30000) {
             lastLoopLog = millis();
-            Serial.printf("[CON_HB] loop() called, netState=%d, gsmConn=%d, wsConn=%d\n", 
+            SafeSerial::printf("[CON] @%lums | Net=%d | GSM=%d | WS=%d\n", 
+                         millis(),
                          (int)g_networkManager.getActiveConnection(), 
                          (int)g_gsmManager.isConnected(), 
                          (int)_gsmWsConnected);
         }
 
         if (g_networkManager.getActiveConnection() == ConnectionType::WIFI) {
+            // Watchdog is now handled by actual receive events
             _wifiConn->loop();
-        } else if (g_networkManager.getActiveConnection() == ConnectionType::GSM) {
+        } else {
+            // Run GSM loop for GSM and NONE states (crucial for socket teardown)
             loopGSM();
         }
     }
 
     bool UnifiedConnection::sendTXT(const char *msg, size_t length) {
-        g_networkManager.notifyActivity();
+        // notifyActivity() removed from here — only RECEIVE counts as 'alive'
 
         if (g_networkManager.getActiveConnection() == ConnectionType::WIFI) {
             return _wifiConn->sendTXT(msg, length);
@@ -78,7 +104,7 @@ namespace prod {
         if (g_networkManager.getActiveConnection() == ConnectionType::WIFI) {
             return _wifiConn->isConnected();
         }
-        return _gsmWsConnected;
+        return _gsmWsConnected && g_networkManager.getActiveConnection() == ConnectionType::GSM;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -86,6 +112,11 @@ namespace prod {
     // ═══════════════════════════════════════════════════════════
 
     void UnifiedConnection::loopGSM() {
+        if (!_serverConfigured) {
+            Serial.println("[WS_GSM] ⚠️ Server not configured — call setServer() first");
+            return;
+        }
+
         if (!g_gsmManager.isConnected()) {
             if (_gsmWsConnected) {
                 Serial.println("[WS_GSM] ⚠️ GSM disconnected — tearing down SSL");
@@ -108,9 +139,15 @@ namespace prod {
 
         // ── 1. Connect and Handshake ──
         if (!_gsmWsConnected) {
-            Serial.printf("[WS_GSM] 🔌 Connecting to %s:%d (GSM+TLS)...\n", SECRET_CSMS_HOST, SECRET_CSMS_PORT);
+            // RATE-LIMIT: Wait 5 seconds between connection attempts to prevent log spam
+            if (millis() - _lastConnectAttempt < 5000) {
+                return;
+            }
+            _lastConnectAttempt = millis();
+
+            Serial.printf("[WS_GSM] 🔌 Connecting to %s:%d (GSM+TLS)...\n", _serverHost, _serverPort);
             
-            bool tlsOk = _sslClient->connect(SECRET_CSMS_HOST, SECRET_CSMS_PORT);
+            bool tlsOk = _sslClient->connect(_serverHost, _serverPort);
             
             if (tlsOk) {
                 if (gsmHandshake()) {
@@ -216,8 +253,8 @@ namespace prod {
             "Sec-WebSocket-Version: 13\r\n"
             "Sec-WebSocket-Protocol: ocpp1.6\r\n"
             "\r\n",
-            path, SECRET_CHARGER_ID, 
-            SECRET_CSMS_HOST);
+            path, _chargerId, 
+            _serverHost);
 
         Serial.println("[WS_GSM] 📤 Sending handshake:");
         Serial.print(handshake);

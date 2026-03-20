@@ -22,6 +22,7 @@ public:
 private:
     // Sub-systems (each maps to a block previously in main.cpp loop())
     void pollPlugDetection(const StateSnapshot& snap);
+    void pollEStop(const StateSnapshot& snap);
     void pollSafetyMonitor(const StateSnapshot& snap);
     void pollEnergyAccumulation(const StateSnapshot& snap);
     void pollChargerHealth();
@@ -29,6 +30,7 @@ private:
     void pollWiFiMonitor();
     void pollVehicleInfo(const struct StateSnapshot& snap);
     void pollPostTxVehicleInfo(const struct StateSnapshot& snap);
+    void pollStatusLEDs();
 
     // ── Plug Detection State ──
     unsigned long _lastPlugCheck     = 0;
@@ -44,6 +46,8 @@ private:
     bool _tempCriticalActive         = false;
     bool _voltageAlertActive         = false;
     bool _currentAlertActive         = false;
+    bool _estopActive                = false;
+    bool _pendingEStopNotification   = false;
 
     // ── Energy Accumulation ──
     unsigned long _lastEnergyTime    = 0;
@@ -55,8 +59,10 @@ private:
     bool _lastChargerHealthy         = false;
     bool _firstHealthCheck           = true;
 
-    // ── WiFi ──
+    // ── WiFi / Network Safety ──
     bool _lastWifiConnected          = true;
+    unsigned long _lastNetworkTime   = 0;
+    bool _commLossTriggered          = false;
 
     // ── VehicleInfo ──
     unsigned long _lastVehicleInfoSent   = 0;
@@ -68,6 +74,11 @@ private:
     // ── Post-Tx VehicleInfo ──
     unsigned long _lastPostTxVehicleInfo = 0;
     bool _sessionEverCompleted           = false;
+
+    // ── Status LEDs ──
+    unsigned long _lastLedBlinkTime  = 0;
+    bool _chargerLedState            = false;
+    bool _networkLedState            = false;
 
     // ── Debug ──
     unsigned long _lastDebug = 0;

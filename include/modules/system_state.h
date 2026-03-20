@@ -237,7 +237,12 @@ public:
 
     // --- Timestamps ---
     unsigned long getLastBMS()  { Lock l(_mutex); return _data.lastBMS; }
-    void setLastBMS(unsigned long v) { Lock l(_mutex); _data.lastBMS = v; }
+    void setLastBMS(unsigned long v) { 
+        extern unsigned long lastBMS;
+        lastBMS = v;
+        Lock l(_mutex); 
+        _data.lastBMS = v; 
+    }
 
     unsigned long getLastHeartbeat()  { Lock l(_mutex); return _data.lastHeartbeat; }
     void setLastHeartbeat(unsigned long v) { Lock l(_mutex); _data.lastHeartbeat = v; }

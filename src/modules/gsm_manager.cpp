@@ -72,10 +72,10 @@ void GSMManager::init() {
 // ═══════════════════════════════════════════════════════════
 //  CONNECT (Full State Machine)
 // ═══════════════════════════════════════════════════════════
-bool GSMManager::connect() {
+GsmError GSMManager::connect(uint32_t networkTimeoutMs) {
     if (!_initialized) {
         Serial.println("[GSM] ❌ Not initialized. Call init() first.");
-        return false;
+        return GsmError::FAIL_FATAL_MODEM;
     }
 
     Serial.println("[GSM] 🔄 Starting modem connection sequence...");
@@ -89,17 +89,23 @@ bool GSMManager::connect() {
     }
 
     // Step through each state sequentially
-    if (!stepBoot()) return false;
-    if (!stepModemReady()) return false;
-    if (!stepSimReady()) return false;
-    if (!stepNetworkRegistered()) return false;
-    if (!stepDataAttached()) return false;
-    if (!stepIpReady()) return false;
+    if (!stepBoot()) return GsmError::FAIL_FATAL_MODEM;
+    if (!stepModemReady()) return GsmError::FAIL_FATAL_MODEM;
+    
+    // CRITICAL: Step 3 - SIM Ready (Fatal if missing)
+    if (!stepSimReady()) {
+        Serial.println("[GSM] 🛑 FATAL: SIM card not detected/ready. Skipping retries.");
+        return GsmError::FAIL_FATAL_NO_SIM;
+    }
+
+    if (!stepNetworkRegistered(networkTimeoutMs)) return GsmError::FAIL_RETRYABLE;
+    if (!stepDataAttached()) return GsmError::FAIL_RETRYABLE;
+    if (!stepIpReady()) return GsmError::FAIL_RETRYABLE;
 
     setState(GSMState::CONNECTED);
     Serial.println("[GSM] ✅ Modem fully connected and ready for TCP/WebSocket!");
 
-    return true;
+    return GsmError::SUCCESS;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -180,15 +186,15 @@ bool GSMManager::stepSimReady() {
     return true;
 }
 
-bool GSMManager::stepNetworkRegistered() {
+bool GSMManager::stepNetworkRegistered(uint32_t timeoutMs) {
     setState(GSMState::NETWORK_REGISTERED);
-    Serial.println("[GSM] 📶 Step 4/6: Waiting for network registration...");
+    Serial.printf("[GSM] 📶 Step 4/6: Waiting for network registration... (Timeout: %ds)\n", (int)(timeoutMs/1000));
 
     // Wait for network registration (timeout from config)
     uint32_t startTime = millis();
     bool registered = false;
 
-    while (millis() - startTime < GSM_CONNECT_TIMEOUT_MS) {
+    while (millis() - startTime < timeoutMs) {
         // g_healthMonitor.feed(); // Feed watchdog during long registration wait - DISABLED
         RegStatus regStatus = _modem.getRegistrationStatus();
         if (regStatus == REG_OK_HOME || regStatus == REG_OK_ROAMING) {

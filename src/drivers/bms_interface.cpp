@@ -11,17 +11,30 @@
 static uint8_t buildStatusFlags()
 {
     uint8_t flags = 0;
-    // Bit0: Hardware failure (optional future use)
-    // if (hardwareFaultDetected) flags |= 0x01;
-    // Bit1: Over temperature
-    if (chargerTemp > 70.0f)
+    
+    // Bit0: Hardware failure (0: Normal. 1: Hardware Failure)
+    if (!isChargerModuleHealthy()) {
+        flags |= 0x01;
+    }
+    
+    // Bit1: Over temperature (0: Normal. 1: Over temperature protection)
+    if (chargerTemp > 70.0f) {
         flags |= 0x02;
-    // Bit3: Battery not connected / reversed
-    if (!batteryConnected)
+    }
+    
+    // Bit2: Input Voltage (0: Normal. 1: Input failure)
+    // Need a specific signal for this, keeping 0 (Normal) for now.
+    
+    // Bit3: Starting state (0: Connected. 1: Not connected/reversed)
+    if (!batteryConnected) {
         flags |= 0x08;
-    // Bit4: Communication timeout (no BMS request in >5s)
-    if ((millis() - lastBMS) > 5000)
+    }
+    
+    // Bit4: Communication State (0: Normal. 1: Timeout)
+    if ((millis() - lastBMS) > 5000) {
         flags |= 0x10;
+    }
+    
     return flags;
 }
 
@@ -33,10 +46,32 @@ void requestSOCFromBMS()
 
 void sendChargerFeedback()
 {
+    auto snap = SystemState::instance().snapshot();
     uint8_t data[8] = {0};
-    data[0] = buildStatusFlags();
-    // Usually, the charger would also send current voltage/current here, 
-    // but the flags are the most critical for the BMS health watchdog.
+
+    // BYTE1-2: Output Voltage (Big-Endian, 0.1V/bit)
+    uint16_t v_raw = (uint16_t)(snap.terminalVolt * 10.0f);
+    data[0] = (uint8_t)(v_raw >> 8);
+    data[1] = (uint8_t)(v_raw & 0xFF);
+
+    // BYTE3-4: Output Current (Big-Endian, 0.1A/bit)
+    uint16_t i_raw = (uint16_t)(snap.terminalCurr * 10.0f);
+    data[2] = (uint8_t)(i_raw >> 8);
+    data[3] = (uint8_t)(i_raw & 0xFF);
+
+    // BYTE5: Status Flags
+    data[4] = buildStatusFlags();
+
+    // BYTE6-8: Reserved (0x00)
+    
+    // Diagnostic: Log what we are sending to the BMS via CAN ID 18FF50E5
+    static unsigned long lastFeedLog = 0;
+    if (millis() - lastFeedLog > 5000) {
+        Serial.printf("[CAN2-TX] 18FF50E5: V=%.1fV I=%.1fA Flags=0x%02X\n", 
+                     snap.terminalVolt, snap.terminalCurr, data[4]);
+        lastFeedLog = millis();
+    }
+
     CAN_MCP2515::sendMessage(ID_HEARTBEAT, data, 8, true);
 }
 
@@ -70,11 +105,23 @@ void handleBMSMessage(const twai_message_t &msg)
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         using namespace can_utils;
+
+        // PLAUSIBILITY GUARD: Only mark vehicle present if reported voltage is realistic.
+        // Vmax is in bytes 0-1 as big-endian, 0.1V/bit. A real battery pack >= 20V.
+        // This filters out CAN bus noise/echoes (~1.3V) that arrive when no EV is connected.
+        const uint16_t vmax_preview = (((uint16_t)msg.data[0]) << 8) | msg.data[1];
+        const float vmax_float = vmax_preview / 10.0f;
+        if (vmax_float < 20.0f) {
+            LOG_BMS("⚠️  BMS frame ignored: Vmax=%.1fV too low — likely CAN noise, not a real vehicle", vmax_float);
+            xSemaphoreGive(dataMutex);
+            return;
+        }
+
         batteryConnected = true;
         gunPhysicallyConnected = true;
         SystemState::instance().setBatteryConnected(true);
         SystemState::instance().setGunPhysicallyConnected(true);
-        lastBMS = millis();
+        SystemState::instance().setLastBMS(millis());
 
         const uint16_t vmax_raw = parseBEUint16(&msg.data[0]);
         const uint16_t imax_raw = parseBEUint16(&msg.data[2]);
@@ -86,10 +133,7 @@ void handleBMSMessage(const twai_message_t &msg)
             return;
         }
 
-        batteryConnected = true;
-        gunPhysicallyConnected = true;
-        SystemState::instance().setBatteryConnected(true);
-        SystemState::instance().setGunPhysicallyConnected(true);
+        // Vehicle confirmed valid — update state
         lastBMS = millis();
 
         const uint8_t dlc = msg.data_length_code;

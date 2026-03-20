@@ -91,9 +91,9 @@ namespace prod
         {
             return;
         }
-        prefs.remove("txnId");
-        prefs.remove("idTag");
-        prefs.remove("txnTime");
+        if (prefs.isKey("txnId")) prefs.remove("txnId");
+        if (prefs.isKey("idTag")) prefs.remove("idTag");
+        if (prefs.isKey("txnTime")) prefs.remove("txnTime");
         Serial.println("[PERSIST] Cleared transaction state");
     }
 
