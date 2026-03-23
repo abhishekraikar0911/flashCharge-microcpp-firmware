@@ -2,6 +2,7 @@
 #include "../include/config/secure_config.h"
 #include "../include/utils/safe_string.h"
 #include <Arduino.h>
+#include "../include/health_monitor.h"
 
 namespace prod
 {
@@ -11,7 +12,8 @@ namespace prod
         // SECURITY FIX: Load credentials from encrypted storage instead of hardcoded values
         Serial.println("[WiFi] 🔐 Loading WiFi credentials from secure storage...");
         
-        // Load all three priority WiFi networks from secure storage
+        // Load up to 3 priority WiFi networks from secure storage
+        numCredentials = 0;
         for (int i = 0; i < 3; i++)
         {
             char ssid[33], pass[64];
@@ -20,15 +22,21 @@ namespace prod
                 SafeString::copy(credentials[i].ssid, ssid, sizeof(credentials[i].ssid));
                 SafeString::copy(credentials[i].password, pass, sizeof(credentials[i].password));
                 Serial.printf("[WiFi] ✓ Priority %d: %s (password hidden)\n", i + 1, ssid);
+                numCredentials++;
             }
             else
             {
-                Serial.printf("[WiFi] ❌ Failed to load Priority %d credentials\n", i + 1);
-                return false;
+                // If we at least found 1 network, we can proceed
+                if (i > 0) {
+                    Serial.printf("[WiFi] (No more credentials in storage)\n");
+                    break;
+                } else {
+                    Serial.println("[WiFi] ❌ No primary WiFi credentials found in secure storage!");
+                    return false;
+                }
             }
         }
         
-        numCredentials = 3;
         isInitiated = true;
         
         Serial.println("[WiFi] ✅ Secure WiFi credentials loaded successfully");
@@ -53,9 +61,9 @@ namespace prod
         uint32_t startTime = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - startTime < CONNECT_TIMEOUT_MS)
         {
-            delay(500);
+            vTaskDelay(pdMS_TO_TICKS(500));
             Serial.print(".");
-            // Feed watchdog if necessary - assuming main loop feeds it
+            g_healthMonitor.feed();
         }
 
         if (WiFi.status() == WL_CONNECTED) {

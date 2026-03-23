@@ -369,6 +369,7 @@ void GSMManager::hardReset() {
 bool GSMManager::softReset() {
     Serial.println("[GSM] 🔄 Soft reset via AT command...");
 
+    g_healthMonitor.feed(); // Feed before long wait
     _modem.sendAT("+CRESET");
     int res = _modem.waitResponse(10000);
 
@@ -377,7 +378,11 @@ bool GSMManager::softReset() {
         return false;
     }
 
-    delay(5000);
+    // Replace 5s raw delay with a fed vTaskDelay loop
+    for (int i=0; i<5; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        g_healthMonitor.feed();
+    }
 
     if (!waitForAT(15000)) {
         Serial.println("[GSM] ❌ Modem not responding after soft reset");

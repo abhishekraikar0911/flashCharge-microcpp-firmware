@@ -419,6 +419,9 @@ void setup()
         [](void *arg) {
             Serial.println("[HW_SVC] Task started for deterministic hardware monitoring");
             while (true) {
+                // Feed the watchdog! Without this, the ESP32 crashes exactly 30s after boot.
+                g_healthMonitor.feed();
+                
                 // Wait for OCPP to initialize before polling hardware that interacts with Connector state
                 if (SystemState::instance().getOcppInitialized()) {
                     g_hardwareService.poll();

@@ -91,7 +91,7 @@
 #define PLUG_DISCONNECT_VOLTAGE_RATE 2.0f       // V/s
 
 // ========== WATCHDOG CONFIGURATION ==========
-#define WATCHDOG_TIMEOUT_S 30
+#define WATCHDOG_TIMEOUT_S 60
 
 // ========== TASK STACK SIZES ==========
 #define TASK_STACK_SIZE_CAN_RX 6144       // Increased from 4096 — proven stable
