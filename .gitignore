@@ -48,3 +48,5 @@ build_output.txt
 # Temporary
 *.tmp
 *.temp
+bfg.jar
+repo-mirror.git.bfg-report/
