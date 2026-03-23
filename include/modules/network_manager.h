@@ -111,6 +111,10 @@ namespace prod {
         uint32_t _lastGSMRecheckTime = 0;
         uint32_t _lastStatusLog = 0;
         uint32_t _lastActivityTime = 0;
+
+        // ── M3: WiFi exponential backoff ──
+        uint32_t _wifiBackoffMs   = 2000;   // Starts at 2s, doubles up to 60s cap
+        uint32_t _wifiNextAttempt = 0;      // millis() timestamp for next allowed attempt
     };
 
     extern NetworkManager g_networkManager;

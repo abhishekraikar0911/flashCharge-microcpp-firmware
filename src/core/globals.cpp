@@ -9,18 +9,7 @@ SemaphoreHandle_t serialMutex = nullptr;
 // =========================================================
 // CAN DIAGNOSTIC BUFFERS (Raw CAN protocol data, not state)
 // =========================================================
-uint8_t lastData[8] = {0};
-uint8_t lastBMSData[8] = {0};
-uint8_t lastStatusData[8] = {0};
-uint8_t lastHData[8] = {0};
-uint8_t lastVmaxData[8] = {0};
-uint8_t lastImaxData[8] = {0};
-uint8_t lastBattData[8] = {0};
-uint8_t lastVoltData[8] = {0};
-uint8_t lastCurrData[8] = {0};
-uint8_t lastTempData[8] = {0};
-uint8_t lastTermData1[8] = {0};
-uint8_t lastTermData2[8] = {0};
+// H3 FIX: Legacy raw copy-buffers removed to save RAM and mutex contention.
 
 // =========================================================
 // CAN RAW PROTOCOL VALUES (Charger Module format)

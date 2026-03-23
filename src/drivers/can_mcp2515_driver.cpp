@@ -214,7 +214,13 @@ namespace CAN_MCP2515
         frame.can_dlc = length;
         memcpy(frame.data, data, length);
 
-        MCP2515::ERROR result = mcp2515->sendMessage(&frame);
+        MCP2515::ERROR result = MCP2515::ERROR_FAIL;
+        if (mcp2515RecoveryMutex && xSemaphoreTake(mcp2515RecoveryMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+        {
+            result = mcp2515->sendMessage(&frame);
+            xSemaphoreGive(mcp2515RecoveryMutex);
+        }
+
         if (result == MCP2515::ERROR_OK)
         {
             driverStatus.total_tx_messages++;
@@ -316,10 +322,25 @@ namespace CAN_MCP2515
             return false;
         }
 
-        // Read error flags and counters
-        uint8_t eflg = mcp2515->getErrorFlags();
-        uint8_t tec = mcp2515->errorCountTX();
-        uint8_t rec = mcp2515->errorCountRX();
+        uint8_t eflg = 0, tec = 0, rec = 0, canintf = 0, status = 0;
+        bool spiLocked = false;
+
+        if (mcp2515RecoveryMutex && xSemaphoreTake(mcp2515RecoveryMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+        {
+            // Read error flags and counters
+            eflg = mcp2515->getErrorFlags();
+            tec = mcp2515->errorCountTX();
+            rec = mcp2515->errorCountRX();
+            canintf = mcp2515->getInterrupts();
+            status = mcp2515->getStatus();
+            xSemaphoreGive(mcp2515RecoveryMutex);
+            spiLocked = true;
+        }
+
+        if (!spiLocked) {
+            Serial.println("[CAN2] ❌ Could not acquire SPI mutex for diagnostics");
+            return false;
+        }
         
         // Determine state string
         const char* stateStr = "INITIALIZING";
@@ -337,17 +358,11 @@ namespace CAN_MCP2515
         char eflgStr[100];
         decodeErrorFlags(eflg, eflgStr, sizeof(eflgStr));
         SafeSerial::printf("[CAN2] EFLG (0x%02X):%s\n", eflg, eflgStr);
-        
-        // Read interrupt flags
-        uint8_t canintf = mcp2515->getInterrupts();
         SafeSerial::printf("[CAN2] CANINTF: 0x%02X\n", canintf);
         
         // Check if SPI communication is working
         bool spiOk = (eflg != 0xFF && canintf != 0xFF);
         SafeSerial::printf("[CAN2] SPI Communication: %s\n", spiOk ? "✅ OK" : "❌ FAILED");
-        
-        // Status
-        uint8_t status = mcp2515->getStatus();
         SafeSerial::printf("[CAN2] MCP Status: 0x%02X\n", status);
         SafeSerial::println("================================");
         

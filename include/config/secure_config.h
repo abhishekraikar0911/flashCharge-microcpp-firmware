@@ -55,6 +55,16 @@ namespace SecureConfig
     bool isConfigured();
 
     /**
+     * @brief Load GSM/APN credentials from secure storage
+     * @param apn Buffer for APN name (min 32 bytes)
+     * @param user Buffer for APN username (min 32 bytes)
+     * @param pass Buffer for APN password (min 32 bytes)
+     * @return true if APN loaded successfully
+     */
+    bool getGSMCredentials(char* apn, char* user, char* pass,
+                           size_t apnLen, size_t userLen, size_t passLen);
+
+    /**
      * @brief Factory reset - clear all stored credentials
      * WARNING: This will require re-provisioning
      */

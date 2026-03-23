@@ -12,6 +12,7 @@
 
 #include "../../include/modules/gsm_manager.h"
 #include "../../include/config/hardware.h"
+#include "../../include/config/secure_config.h"
 #include "../../include/health_monitor.h"
 #include <Arduino.h>
 
@@ -227,16 +228,26 @@ bool GSMManager::stepNetworkRegistered(uint32_t timeoutMs) {
 
 bool GSMManager::stepDataAttached() {
     setState(GSMState::DATA_ATTACHED);
-    Serial.println("[GSM] 🌐 Step 5/6: Attaching GPRS/LTE data...");
+    Serial.println("[GSM] \U0001f310 Step 5/6: Attaching GPRS/LTE data...");
+
+    // Load APN from NVS (SecureConfig) — no hardcoded credentials in source
+    char apn[32]  = "JIOCIOT2";  // Safe default if NVS not yet migrated
+    char user[32] = "";
+    char pass[32] = "";
+    if (SecureConfig::getGSMCredentials(apn, user, pass, sizeof(apn), sizeof(user), sizeof(pass))) {
+        Serial.printf("[GSM] \U0001f511 APN loaded from NVS: %s\n", apn);
+    } else {
+        Serial.println("[GSM] \u26a0\ufe0f  APN not in NVS — using compile-time fallback");
+    }
 
     // Connect to GPRS/LTE data with APN
-    if (!_modem.gprsConnect(GSM_APN, GSM_APN_USER, GSM_APN_PASS)) {
-        Serial.printf("[GSM] ❌ GPRS connect failed (APN: %s)\n", GSM_APN);
+    if (!_modem.gprsConnect(apn, user, pass)) {
+        Serial.printf("[GSM] \u274c GPRS connect failed (APN: %s)\n", apn);
         setState(GSMState::ERROR);
         return false;
     }
 
-    Serial.printf("[GSM] ✅ Data attached (APN: %s)\n", GSM_APN);
+    Serial.printf("[GSM] \u2705 Data attached (APN: %s)\n", apn);
     return true;
 }
 

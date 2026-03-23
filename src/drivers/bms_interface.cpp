@@ -134,7 +134,6 @@ void handleBMSMessage(const twai_message_t &msg)
         }
 
         const uint8_t dlc = msg.data_length_code;
-        memcpy(lastBMSData, msg.data, dlc > 8 ? 8 : dlc);
 
         // Individual field validation
         if (vmax_raw <= 1500 && imax_raw <= 2000) {
@@ -171,15 +170,34 @@ void handleBMSMessage(const twai_message_t &msg)
             lastBmsLog = millis();
         }
 
-        // SAFETY: Parse charging permission flags
-        bool newSafeToCharge = (msg.data[4] == 0x00);
+        // H4 FIX: Parse individual BMS fault bits from byte 4 for granular fault reporting
+        // Byte 4 bit definitions per Rivot Motors BMS protocol v1.0:
+        //   0x00 = All OK / safe to charge
+        //   Bit 0 (0x01) = Over-current protection active
+        //   Bit 1 (0x02) = Cell voltage fault (over/under voltage)
+        //   Bit 2 (0x04) = Thermal warning (battery temperature)
+        //   Bit 3 (0x08) = Communication fault (internal BMS)
+        //   Bit 7 (0x80) = Emergency stop from BMS
+        uint8_t faultByte = msg.data[4];
+        bool newSafeToCharge = (faultByte == 0x00);
         bool curSafe = state.getBmsSafeToCharge();
         if (newSafeToCharge != curSafe) {
-            LOG_BMS("BMS Safety: %s -> %s", curSafe ? "ENABLED" : "DISABLED", newSafeToCharge ? "ENABLED" : "DISABLED");
+            if (!newSafeToCharge) {
+                // Log which specific fault bits are set
+                LOG_BMS("BMS FAULT byte=0x%02X:%s%s%s%s%s", faultByte,
+                    (faultByte & 0x01) ? " OVER_CURRENT" : "",
+                    (faultByte & 0x02) ? " CELL_VOLTAGE" : "",
+                    (faultByte & 0x04) ? " THERMAL"      : "",
+                    (faultByte & 0x08) ? " COMM_FAULT"   : "",
+                    (faultByte & 0x80) ? " EMERGENCY_STOP" : "");
+            } else {
+                LOG_BMS("BMS Safety: RESTORED (all faults cleared)");
+            }
             state.setBmsSafeToCharge(newSafeToCharge);
         }
 
-        state.setChargingSwitch(msg.data[4] == 0x00);
+        state.setChargingSwitch(faultByte == 0x00);
+        // Byte 5: 0x01 = heating active
         state.setHeating(msg.data[5] == 0x01 ? 1 : 0);
 
         xSemaphoreGive(dataMutex);

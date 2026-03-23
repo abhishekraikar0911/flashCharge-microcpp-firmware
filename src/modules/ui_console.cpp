@@ -108,27 +108,17 @@ void printDecodedData()
                       snap.BMS_Vmax, snap.BMS_Imax,
                       snap.chargingSwitch ? "YES" : "NO",
                       snap.heating ? "HEATING" : "CHARGING");
-        Serial.print("Raw BMS Data: ");
-        printBytes(lastBMSData, 8);
     }
     else if (userChoice == 2)
     {
         Serial.print("Charger Status: ");
         Serial.println(chargerStatus);
         Serial.printf("Charger Vmax: %.2f V  Charger Imax: %.2f A\n", snap.Charger_Vmax, snap.Charger_Imax);
-        Serial.print("Raw Charger Data: ");
-        printBytes(lastStatusData, 8);
     }
     else if (userChoice == 3)
     {
         Serial.printf("Output Voltage: %.2f V  Output Current: %.2f A  Temp: %.2f °C\n",
                       snap.chargerVolt, snap.chargerCurr, snap.chargerTemp);
-        Serial.print("Raw Output Data V: ");
-        printBytes(lastBattData, 8);
-        Serial.print("Raw Output Data I: ");
-        printBytes(lastCurrData, 8);
-        Serial.print("Raw Output Data T: ");
-        printBytes(lastTempData, 8);
     }
     else if (userChoice == 4)
     {
@@ -136,10 +126,6 @@ void printDecodedData()
                       snap.terminalVolt, snap.terminalCurr, snap.terminalPower);
         Serial.print("Terminal Status: ");
         Serial.println(terminalStatus);
-        Serial.print("Raw Terminal Data 1: ");
-        printBytes(lastTermData1, 8);
-        Serial.print("Raw Terminal Data 2: ");
-        printBytes(lastTermData2, 8);
         Serial.printf("Accumulated Energy: %.2f Wh\n", snap.energyWh);
     }
     else if (userChoice == 5)
@@ -150,23 +136,6 @@ void printDecodedData()
         Serial.printf("[Output] V=%.2fV I=%.2fA T=%.2fC\n", snap.chargerVolt, snap.chargerCurr, snap.chargerTemp);
         Serial.printf("[Terminal] V=%.2fV I=%.2fA P=%.2fW\n", snap.terminalVolt, snap.terminalCurr, snap.terminalPower);
         Serial.printf("Accumulated Energy: %.2f Wh\n", snap.energyWh);
-        Serial.print("Raw BMS: ");
-        printBytes(lastBMSData, 8);
-        Serial.print("Raw Charger: ");
-        printBytes(lastStatusData, 8);
-        Serial.print("Raw Output V: ");
-        printBytes(lastBattData, 8);
-        Serial.print("Raw Output I: ");
-        printBytes(lastCurrData, 8);
-        Serial.print("Raw Output T: ");
-        printBytes(lastTempData, 8);
-        Serial.print("Raw Terminal1: ");
-        printBytes(lastTermData1, 8);
-        Serial.print("Raw Terminal2: ");
-        printBytes(lastTermData2, 8);
-        Serial.print("Heartbeat: ");
-        printBytes(lastHData, 8);
-        Serial.println("=================================");
     }
 }
 

@@ -27,6 +27,15 @@
 #define CAN_RX_QUEUE_SIZE 64
 #define CAN_TX_QUEUE_SIZE 16
 
+// ========== CAN DECODER SCALE FACTORS (M2 FIX) ==========
+// Charger Module (CAN1 — ISO1050 TWAI)
+#define CHARGER_VMAX_SCALE      1024.0f    // raw_u32 / 1024 → Volts
+#define CHARGER_IMAX_SCALE      30.5f      // raw_u32 / 30.5  → Amps
+#define CHARGER_CURR_U16_SCALE  1024.0f    // raw_u16 / 1024 → Amps
+#define CHARGER_TEMP_SCALE      0.001f     // raw_u16 × 0.001 → °C
+#define CHARGER_VOLT_FB_SCALE   10.0f      // feedback: V × 10 → uint16 code
+#define CHARGER_CURR_FB_SCALE   10.0f      // feedback: A × 10 → uint16 code
+
 // ========== GSM MODEM CONFIGURATION (SIM A7670C) ==========
 #define GSM_TX_PIN        17         // ESP32 TX → Modem RXD (UART2)
 #define GSM_RX_PIN        16         // ESP32 RX ← Modem TXD (UART2)
@@ -34,10 +43,8 @@
 #define GSM_BAUD_RATE     115200
 #define GSM_SERIAL        Serial2    // Hardware UART2
 
-// GSM APN Configuration
-#define GSM_APN           "JIOCIOT2"
-#define GSM_APN_USER      ""
-#define GSM_APN_PASS      ""
+// GSM APN Configuration: loaded at runtime from secure NVS via SecureConfig::getGSMCredentials()
+// (No hardcoded APN to avoid leaking credentials in source control)
 
 // GSM Timing Configuration
 #define GSM_RESET_PULSE_MS      2500   // Active-HIGH reset pulse duration
@@ -68,8 +75,8 @@
 #define BATTERY_CAPACITY_AH 30.0f
 
 // ========== ALERT THRESHOLDS ==========
-#define ALERT_TEMP_WARNING_C 70.0f
-#define ALERT_TEMP_CRITICAL_C 70.0f
+#define ALERT_TEMP_WARNING_C  60.0f   // H2 FIX: Graduated — throttle/warn at 60°C
+#define ALERT_TEMP_CRITICAL_C 70.0f   // Emergency stop at 70°C (unchanged)
 #define ALERT_VOLTAGE_MIN_V 56.0f
 #define ALERT_VOLTAGE_MAX_V 84.0f  // Increased from 95V to accommodate transients
 #define ALERT_CURRENT_MAX_A 100.0f

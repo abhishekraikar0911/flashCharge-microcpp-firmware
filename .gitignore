@@ -35,6 +35,15 @@ Thumbs.db
 # Logs
 *.log
 logs/
+build_error.log
+
+# Session & diagnostic logs (may contain IPs, IDs, credentials)
+session_*.txt
+boot_logs*.txt
+bms_live.txt
+verification_logs.txt
+build_finishing_fix.txt
+build_output.txt
 
 # Temporary
 *.tmp

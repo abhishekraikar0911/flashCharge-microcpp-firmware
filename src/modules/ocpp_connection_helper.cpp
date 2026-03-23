@@ -10,6 +10,7 @@
 
 #include "../../include/modules/ocpp_connection_helper.h"
 #include "../../include/secrets.h"
+#include "../../include/config/certs.h"
 #include "../../include/utils/safe_serial.h"
 #include <Arduino.h>
 
@@ -41,12 +42,10 @@ namespace prod {
         if (_wifiWS) {
             char url[256];
             snprintf(url, sizeof(url), "/ocpp16/%s", _chargerId);
-            // FIX A: Use beginSslWithCA(NULL) to explicitly bypass certificate validation.
-            // beginSSL() with empty string still validates against an empty bundle and fails.
-            // NULL CA cert = insecure/skip-validation mode in this library version.
-            _wifiWS->beginSslWithCA(_serverHost, _serverPort, url, (const char*)nullptr, "ocpp1.6");
+            // ENFORCE SECURITY PROFILE 2: Verify Server Certificate against Let's Encrypt Root CA
+            _wifiWS->beginSslWithCA(_serverHost, _serverPort, url, ISRG_ROOT_X1_CERT, "ocpp1.6");
             _wifiWS->setReconnectInterval(5000);
-            Serial.printf("[WS_WIFI] 🎯 WiFi WS configured (insecure SSL): %s:%d%s\n", _serverHost, _serverPort, url);
+            Serial.printf("[WS_WIFI] 🎯 WiFi WS configured (STRICT SSL): %s:%d%s\n", _serverHost, _serverPort, url);
         }
     }
 
@@ -134,7 +133,9 @@ namespace prod {
         // Create a FRESH SSLClient for every new connection attempt
         if (!_sslClient) {
             _sslClient = new SSLClient(&g_gsmManager.getClient());
-            Serial.println("[WS_GSM] 🔒 SSLClient created (fresh TLS state)");
+            // ENFORCE SECURITY PROFILE 2: Verify Server Certificate
+            _sslClient->setCACert(ISRG_ROOT_X1_CERT);
+            Serial.println("[WS_GSM] 🔒 SSLClient created (strict TLS state)");
         }
 
         // ── 1. Connect and Handshake ──

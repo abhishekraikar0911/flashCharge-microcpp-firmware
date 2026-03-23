@@ -105,13 +105,17 @@ void setup()
         Serial.println("  Production-Ready Edition (Secure)");
         Serial.printf("  Build: %s\n", BUILD_TIMESTAMP);
         Serial.printf("  StationId: %s\n", chargerId);
-        Serial.printf("  CSMS: %s:%d\n", csmsHost, csmsPort);
         Serial.println("========================================");
-        Serial.println("\n🔐 SECURE: Configuration loaded from encrypted storage");
+        Serial.println("\n✅ SECURE: Configuration loaded from encrypted storage");
+#ifdef DEBUG_VERBOSE
+        // WARNING: Only print credentials in debug builds — never in production!
         Serial.printf("  CSMS_HOST = %s\n", csmsHost);
         Serial.printf("  CSMS_PORT = %d\n", csmsPort);
         Serial.printf("  CSMS_URL  = %s\n", csmsUrl);
         Serial.printf("  CHARGER_ID = %s\n", chargerId);
+#else
+        Serial.println("  [CSMS details hidden in production build]");
+#endif
         Serial.println("========================================\n");
     }
     else
@@ -139,12 +143,12 @@ void setup()
     }
     
     // *** DIAGNOSTIC: Check if rebooting too quickly (indicates crash loop) ***
-    static unsigned long lastBootTime = 0;
-    unsigned long bootTime = millis();
-    if (lastBootTime > 0 && bootTime < 30000) {
-        Serial.printf("[DIAGNOSTIC] ⚠️  ⚠️  RAPID REBOOT DETECTED! Only %lu ms uptime before crash\n", bootTime);
+    // Uses persistent reboot counter — works across full power cycles.
+    uint8_t rebootCount = g_persistence.getRebootCount();
+    if (rebootCount > 3 && reset_reason != ESP_RST_POWERON) {
+        Serial.printf("[DIAGNOSTIC] ⚠️  ⚠️  CRASH LOOP DETECTED! Reboot count: %u\n", rebootCount);
+        Serial.println("[DIAGNOSTIC]    Check last crash: ESP_RST_PANIC or ESP_RST_TASK_WDT");
     }
-    lastBootTime = bootTime;
 
 
 
@@ -399,22 +403,41 @@ void setup()
     Serial.println("[BOOT] 🔄 Initializing OTA...");
     g_otaManager.init();
 
-    // For production with valid SSL certificate, uncomment:
-    // const char* ROOT_CA = "-----BEGIN CERTIFICATE-----\n..."; 
-    // g_securityManager.loadRootCA(ROOT_CA);
-    // g_securityManager.enableCertificateVerification();
-    
-    // For now, using setInsecure() to accept self-signed certificates
-    Serial.println("[BOOT] ⚠️  Using insecure mode for WSS (accepts any certificate)");
+    Serial.println("[BOOT] ✅ Security manager configured for Strict TLS (Profile 2)");
 
     // NOTE: OCPP initialization now happens in ocppTask after WiFi is ready
     // This prevents the race condition that was causing crashes
     // Connector plug detection is configured in ocpp_manager.cpp
 
-    // Initialize hardware monitoring service (extracted from loop())
+    // CRITICAL: Initialize hardware monitoring service
     g_hardwareService.begin();
 
-    // PHASE 4: Removed g_ocppStateMachine.init() — library manages connector state internally
+    // M7 FIX: Create HW_SVC task on Core 1 (priority 4) for deterministic hardware polling
+    // This removes the dependency on the weak Arduino loop() handler.
+    static TaskHandle_t hwSvcTaskHandle = nullptr;
+    BaseType_t hwResult = xTaskCreatePinnedToCore(
+        [](void *arg) {
+            Serial.println("[HW_SVC] Task started for deterministic hardware monitoring");
+            while (true) {
+                // Wait for OCPP to initialize before polling hardware that interacts with Connector state
+                if (SystemState::instance().getOcppInitialized()) {
+                    g_hardwareService.poll();
+                }
+                vTaskDelay(pdMS_TO_TICKS(50)); // Poll at 20Hz
+            }
+        },
+        "HW_SVC",
+        4096,
+        nullptr,
+        4,  // Priority 4 — between Ui (2) and Network (5)
+        &hwSvcTaskHandle,
+        1); // Core 1
+
+    if (hwResult != pdPASS) {
+        Serial.println("[CRITICAL] Failed to create HW_SVC task!");
+    } else {
+        g_healthMonitor.addTaskToWatchdog(hwSvcTaskHandle, "HW_SVC");
+    }
 
     Serial.println("[BOOT] ✅ All systems initialized!\n");
     
@@ -425,29 +448,12 @@ void setup()
 
 void loop()
 {
-    // CRITICAL: Feed watchdog for loop task (runs on Core 1)
+    // CRITICAL: Feed watchdog for the idle loop task (runs on Core 1 at priority 1) 
+    // and process the central health monitor check.
     g_healthMonitor.feed();
     g_healthMonitor.poll();
 
-    // CRITICAL: Wait for OCPP initialization before accessing connector 1
-    if (!SystemState::instance().getOcppInitialized()) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        return;
-    }
-    
-    // PHASE 4: Removed g_ocppStateMachine.poll() — library manages connector state internally
-
-    // ═══════════════════════════════════════════════════════════
-    // All hardware monitoring delegated to HardwareService
-    // (Plug detection, Safety, Energy, Charger health, VehicleInfo)
-    // ═══════════════════════════════════════════════════════════
-    g_hardwareService.poll();
-
-    // ═══════════════════════════════════════════════════════════
-    // Heartbeat / Autonomous Boot Indicator
-    // (Now handled by HardwareService pollStatusLEDs)
-    // ═══════════════════════════════════════════════════════════
-
-    // FIX #5: Yield to prevent watchdog timeout
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // M7 FIX: All hardware monitoring has been moved to the HW_SVC FreeRTOS task.
+    // The Arduino loop() now just idles and maintains the health monitor.
+    vTaskDelay(pdMS_TO_TICKS(100));
 }

@@ -3,6 +3,7 @@
 #include "../../include/security_manager.h"
 #include "../../include/ocpp/ocpp_client.h"
 #include "../../include/header.h"
+#include "../../include/config/version.h"
 #include <Update.h>
 #include <MicroOcpp/Core/Context.h>
 #include <MicroOcpp/Model/Model.h>
@@ -105,7 +106,40 @@ namespace prod
     {
         if (!Update.isRunning())
         {
-            Serial.printf("[OTA] ?? Starting update (size: %u bytes)\n", UPDATE_SIZE_UNKNOWN);
+            // H5 FIX: Anti-rollback — reject firmware older than current version
+            // The ESP32 app descriptor contains version at bytes 48-59 (app_desc_t.version)
+            // We parse major.minor.patch from the incoming binary's fixed offset.
+            if (size >= 64)
+            {
+                // app_desc_t.version is a 32-byte null-terminated string starting at offset 48
+                const char* incomingVer = reinterpret_cast<const char*>(buf + 48);
+                int inMajor = 0, inMinor = 0, inPatch = 0;
+                if (sscanf(incomingVer, "%d.%d.%d", &inMajor, &inMinor, &inPatch) == 3)
+                {
+                    bool isDowngrade =
+                        (inMajor < FIRMWARE_VERSION_MAJOR) ||
+                        (inMajor == FIRMWARE_VERSION_MAJOR && inMinor < FIRMWARE_VERSION_MINOR) ||
+                        (inMajor == FIRMWARE_VERSION_MAJOR && inMinor == FIRMWARE_VERSION_MINOR && inPatch < FIRMWARE_VERSION_PATCH);
+
+                    if (isDowngrade)
+                    {
+                        Serial.printf("[OTA] \xe2\x9b\x94 ROLLBACK REJECTED: incoming v%d.%d.%d < current v%s\n",
+                                      inMajor, inMinor, inPatch, FIRMWARE_VERSION);
+                        ocpp::sendSystemAlert("OTA_ROLLBACK_BLOCKED",
+                                              "Firmware downgrade attempt blocked by anti-rollback policy", "Critical");
+                        g_persistence.recordLastError("OTA_ROLLBACK_BLOCKED");
+                        return 0;
+                    }
+                    Serial.printf("[OTA] \xe2\x9c\x85 Version check passed: incoming v%d.%d.%d >= current v%s\n",
+                                  inMajor, inMinor, inPatch, FIRMWARE_VERSION);
+                }
+                else
+                {
+                    Serial.println("[OTA] \xe2\x9a\xa0\xef\xb8\x8f Version string not found at expected offset — proceeding without version check");
+                }
+            }
+
+            Serial.printf("[OTA] Starting update (size: %u bytes)\n", UPDATE_SIZE_UNKNOWN);
 
             if (!Update.begin(UPDATE_SIZE_UNKNOWN))
             {

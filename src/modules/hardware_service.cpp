@@ -186,17 +186,16 @@ void HardwareService::pollSafetyMonitor(const StateSnapshot& snap) {
     if (snap.transactionActive && (millis() - snap.lastBMS > 5000)) {
         static unsigned long lastTimeoutPrint = 0;
         if (millis() - lastTimeoutPrint > 2000) {
-            Serial.printf("[SAFETY] 🚨 BMS COMM TIMEOUT: No data for %lu ms\n", millis() - snap.lastBMS);
+            Serial.printf("[SAFETY] \xf0\x9f\x9a\xa8 BMS COMM TIMEOUT: No data for %lu ms\n", millis() - snap.lastBMS);
             lastTimeoutPrint = millis();
         }
-        
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            SystemState::instance().setChargingEnabled(false);
-            xSemaphoreGive(dataMutex);
-        }
+
+        // C1 FIX: SystemState setters are already self-locking via their internal mutex.
+        // The legacy dataMutex wrapper here created a dual-lock ordering hazard with
+        // the CAN decoder tasks (which hold dataMutex while calling state.setXxx()).
+        SystemState::instance().setChargingEnabled(false);
         sendImmediateChargerStop();
-        
-        // PHASE 2: Removed sendBMSAlert — library addErrorDataInput("OtherError"/BMS_TIMEOUT) handles StatusNotification
+
         if (ocpp::isTransactionRunningSafe(1)) {
             SystemState::instance().setFaultLockActive(true);
             SystemState::instance().setFaultLockTime(millis());
@@ -223,15 +222,22 @@ void HardwareService::pollSafetyMonitor(const StateSnapshot& snap) {
         _lastBmsSafetyCheck = millis();
     }
 
-    // --- Temperature ---
+    // --- Temperature — Graduated Response ---
+    // WARNING tier (60°C): log & notify, continue charging
+    if (snap.chargerTemp > ALERT_TEMP_WARNING_C && snap.chargerTemp <= ALERT_TEMP_CRITICAL_C && !_tempWarningActive) {
+        Serial.printf("[TEMP] ⚠️  WARNING: Charger temperature %.1f\xc2\xb0""C — approaching critical\n", snap.chargerTemp);
+        ocpp::sendSystemAlert("TEMP_WARNING", "Charger temperature near critical limit", "Warning");
+        _tempWarningActive = true;
+    } else if (snap.chargerTemp <= ALERT_TEMP_WARNING_C && _tempWarningActive) {
+        Serial.printf("[TEMP] ✅ Temperature back to normal: %.1f\xc2\xb0""C\n", snap.chargerTemp);
+        _tempWarningActive = false;
+    }
+
+    // CRITICAL tier (70°C): immediate hardware stop
     if (snap.chargerTemp > ALERT_TEMP_CRITICAL_C && !_tempCriticalActive) {
-        Serial.printf("[TEMP] 🚨 CRITICAL overheat: %.1f°C\n", snap.chargerTemp);
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            SystemState::instance().setChargingEnabled(false);
-            xSemaphoreGive(dataMutex);
-        }
+        Serial.printf("[TEMP] \xf0\x9f\x9a\xa8 CRITICAL overheat: %.1f\xc2\xb0""C — EMERGENCY STOP\n", snap.chargerTemp);
+        SystemState::instance().setChargingEnabled(false);
         sendImmediateChargerStop();
-        // PHASE 2: Removed sendSystemAlert — library addErrorDataInput("HighTemperature") handles StatusNotification
 
         if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
             SystemState::instance().setFaultLockActive(true);
@@ -240,8 +246,9 @@ void HardwareService::pollSafetyMonitor(const StateSnapshot& snap) {
         }
         _tempCriticalActive = true;
     } else if (snap.chargerTemp < (ALERT_TEMP_CRITICAL_C - 10.0f) && _tempCriticalActive) {
-        Serial.printf("[TEMP] ✅ Temperature normalized: %.1f°C\n", snap.chargerTemp);
+        Serial.printf("[TEMP] \xe2\x9c\x85 Temperature normalized: %.1f\xc2\xb0""C\n", snap.chargerTemp);
         _tempCriticalActive = false;
+        _tempWarningActive  = false;
     }
 
     // --- Voltage/Current (Summary) ---

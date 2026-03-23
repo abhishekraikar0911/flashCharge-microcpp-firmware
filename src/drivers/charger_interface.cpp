@@ -58,8 +58,6 @@ void handleChargerMessage(const twai_message_t &msg)
     }
 
     const uint8_t dlc = msg.data_length_code;
-    // FIX: Bounds check before memcpy
-    memcpy(lastData, msg.data, (dlc > 8) ? 8 : dlc);
 
     const uint32_t id = msg.extd ? (msg.identifier & 0x1FFFFFFFUL)
                                  : (msg.identifier & 0x7FF);
@@ -109,7 +107,6 @@ static void decode_0681817E(const twai_message_t &msg)
     {
         if (func == 0x32)
         {
-            memcpy(lastStatusData, msg.data, dlc > 8 ? 8 : dlc);
             chargerStatus = (msg.data[3] == 0x00) ? "ON" : "OFF";
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
                 Serial.printf("[CHARGER]   ← Status: %s\n", chargerStatus);
@@ -117,7 +114,6 @@ static void decode_0681817E(const twai_message_t &msg)
         }
         else if (func == 0x00)
         {
-            memcpy(lastVmaxData, msg.data, dlc > 8 ? 8 : dlc);
             float vmax = raw / 1024.0f;
             // CRITICAL FIX: Validate voltage reading
             if (!CANValidator::validateVoltage(vmax))
@@ -132,7 +128,6 @@ static void decode_0681817E(const twai_message_t &msg)
         }
         else if (func == 0x03)
         {
-            memcpy(lastImaxData, msg.data, dlc > 8 ? 8 : dlc);
             float imax = raw / 30.5f;
             // CRITICAL FIX: Validate current reading
             if (!CANValidator::validateCurrent(imax))
@@ -185,7 +180,6 @@ static void decode_0681827E(const twai_message_t &msg)
     {
         if (func == 0x84)
         {
-            memcpy(lastBattData, msg.data, dlc > 8 ? 8 : dlc);
             float cv = parseBEUint32(&msg.data[4]) / 1024.0f;
             // CRITICAL FIX: Validate voltage
             if (!CANValidator::validateVoltage(cv))
@@ -206,7 +200,6 @@ static void decode_0681827E(const twai_message_t &msg)
         }
         else if (func == 0x82)
         {
-            memcpy(lastCurrData, msg.data, dlc > 8 ? 8 : dlc);
             float cc = parseBEUint16(&msg.data[6]) / 1024.0f;
             // CRITICAL FIX: Validate current
             if (!CANValidator::validateCurrent(cc))
@@ -222,19 +215,22 @@ static void decode_0681827E(const twai_message_t &msg)
         }
         else if (func == 0x80)
         {
-            memcpy(lastTempData, msg.data, dlc > 8 ? 8 : dlc);
             float ct = parseBEUint16(&msg.data[6]) * 0.001f;
-            state.setChargerTemp(ct);
+            // CRITICAL FIX C5: Validate temperature reading before storing
+            // A corrupted frame could produce thousands of degrees, bypassing the 70°C cutoff
+            if (ct >= 0.0f && ct <= 120.0f) {
+                state.setChargerTemp(ct);
+            } else {
+                Serial.printf("[CAN] ⚠️  Invalid charger temp: %.1f\xc2\xb0""C, ignoring\n", ct);
+            }
         }
         else if (func == 0x79)
         {
-            memcpy(lastVoltData, msg.data, dlc > 8 ? 8 : dlc);
             metric79_raw = parseBEUint16(&msg.data[6]);
             metric79_scaled = metric79_raw * 1.0f;
         }
         else if (func == 0x83)
         {
-            memcpy(lastVoltData, msg.data, dlc > 8 ? 8 : dlc);
             metric83_scaled = parseBEFloat(&msg.data[4]);
         }
         xSemaphoreGive(dataMutex);
@@ -265,7 +261,6 @@ static void decode_00433F01(const twai_message_t &msg)
     auto& state = SystemState::instance();
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-        memcpy(lastTermData1, msg.data, dlc > 8 ? 8 : dlc);
         
         float tv = parseBEFloat(&msg.data[0]);
         float tc = parseBEFloat(&msg.data[4]);
@@ -319,7 +314,6 @@ static void decode_00473F01(const twai_message_t &msg)
 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-        memcpy(lastTermData2, msg.data, dlc > 8 ? 8 : dlc);
         const uint8_t b6 = msg.data[6], b7 = msg.data[7];
         if (b6 == 0x03 && b7 == 0x01)
             terminalStatus = "NOT CHARGING";
@@ -343,7 +337,6 @@ static void decode_18FF50E5(const twai_message_t &msg)
 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-        memcpy(lastHData, msg.data, dlc > 8 ? 8 : dlc);
         const bool alive = (msg.data[4] & 0x08) != 0; // bit 3 alive
         terminalchargerStatus = alive ? "HEARTBEAT ALIVE" : "NO HEARTBEAT";
         

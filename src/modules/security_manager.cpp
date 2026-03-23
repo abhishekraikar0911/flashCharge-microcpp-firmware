@@ -1,5 +1,6 @@
 #include "../include/security_manager.h"
 #include "../include/config/security.h"
+#include "../include/config/certs.h"
 #include <Arduino.h>
 #include <string.h>
 #include <mbedtls/ecdsa.h>
@@ -12,11 +13,9 @@ namespace prod
     {
         Serial.println("[Security] 🔒 Initializing security manager");
 
-        // For development, disable cert verification by default
-        // In production, enable this and provide valid Root CA
-        disableCertificateVerification();
-
-        Serial.println("[Security] ⚠️  WARNING: Certificate verification disabled - development mode only!");
+        // Enforce Server TLS Verification (OCPP Security Profile 2 / Let's Encrypt CA)
+        loadRootCA(ISRG_ROOT_X1_CERT);
+        enableCertificateVerification();
     }
 
     bool SecurityManager::loadRootCA(const char *caCert)
@@ -58,8 +57,10 @@ namespace prod
         {
             secureClient = new WiFiClientSecure();
         }
-        secureClient->setInsecure();
+        // Removed setInsecure() to enforce security policies.
+        // If someone explicitly calls this, TLS handshakes will fail.
         tlsEnabled = false;
+        Serial.println("[Security] ⚠️ disableCertificateVerification called, but setInsecure() is disabled in production.");
     }
 
     WiFiClientSecure *SecurityManager::getSecureClient()
@@ -67,7 +68,7 @@ namespace prod
         if (!secureClient)
         {
             secureClient = new WiFiClientSecure();
-            secureClient->setInsecure();
+            secureClient->setCACert(ISRG_ROOT_X1_CERT);
         }
         return secureClient;
     }

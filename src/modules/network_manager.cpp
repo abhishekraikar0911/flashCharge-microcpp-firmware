@@ -134,14 +134,25 @@ void NetworkManager::poll() {
             break;
 
         case NetworkState::WIFI_CONNECTING:
+            // M3 FIX: Exponential backoff — don't attempt WiFi until backoff window expires
+            if ((int32_t)(now - _wifiNextAttempt) < 0) {
+                Serial.printf("[NET] \xe2\x8f\xb3 WiFi backoff: waiting %u ms before next attempt\n",
+                              (unsigned)(_wifiNextAttempt - now));
+                break;
+            }
             if (attemptWiFi()) {
                 _state = NetworkState::WIFI_CONNECTED;
                 _activeConnection = ConnectionType::WIFI;
-                _lastActivityTime = millis(); // FIX: Reset watchdog after WiFi connects
-                Serial.println("[NET] ✅ Connected via WiFi (Fallback)");
+                _lastActivityTime = millis();
+                _wifiBackoffMs = 2000;   // Reset backoff on success
+                _wifiNextAttempt = 0;
+                Serial.println("[NET] \xe2\x9c\x85 Connected via WiFi (Fallback)");
             } else {
-                // WiFi also failed — retry GSM
-                Serial.println("[NET] ❌ WiFi also failed — retrying GSM...");
+                // Exponential backoff: double up to 60s cap
+                _wifiBackoffMs = (_wifiBackoffMs < 60000) ? (_wifiBackoffMs * 2) : 60000;
+                _wifiNextAttempt = millis() + _wifiBackoffMs;
+                Serial.printf("[NET] \xe2\x9d\x8c WiFi failed \xe2\x80\x94 next attempt in %u s (retrying GSM)\n",
+                              (unsigned)(_wifiBackoffMs / 1000));
                 _gsmRetryCount = 0;
                 _state = NetworkState::GSM_CONNECTING;
             }
@@ -274,7 +285,7 @@ bool NetworkManager::attemptWiFi() {
     // Wait for connection (with timeout)
     uint32_t start = millis();
     while (!g_wifiManager.isConnected() && millis() - start < 30000) {
-        delay(500);
+        vTaskDelay(pdMS_TO_TICKS(500));  // H1 FIX: Never block scheduler; CAN/safety tasks must keep running
     }
 
     if (g_wifiManager.isConnected()) {

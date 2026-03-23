@@ -28,10 +28,7 @@ extern SemaphoreHandle_t serialMutex;
 // =========================================================
 // CAN DIAGNOSTIC BUFFERS (Raw protocol data)
 // =========================================================
-extern uint8_t lastData[8], lastBMSData[8], lastStatusData[8], lastHData[8];
-extern uint8_t lastVmaxData[8], lastImaxData[8], lastBattData[8];
-extern uint8_t lastVoltData[8], lastCurrData[8], lastTempData[8];
-extern uint8_t lastTermData1[8], lastTermData2[8];
+// H3 FIX: Legacy raw copy-buffers removed.
 
 // CAN RAW PROTOCOL VALUES (Charger Module format)
 extern uint32_t cachedRawV;

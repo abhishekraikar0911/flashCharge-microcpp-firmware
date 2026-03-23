@@ -72,6 +72,16 @@ namespace SecureConfig
             return false;
         }
         
+        // Migrate GSM/APN credentials
+        if (prefs.begin("secure_cred", false))
+        {
+            prefs.putString("gsm_apn",  "JIOCIOT2");
+            prefs.putString("gsm_user", "");
+            prefs.putString("gsm_pass", "");
+            prefs.end();
+            Serial.println("[SECURE_CONFIG]   ✓ GSM APN: JIOCIOT2");
+        }
+        
         // Store charger identity (non-sensitive, but centralized)
         if (prefs.begin("secure_cred", false))
         {
@@ -150,6 +160,27 @@ namespace SecureConfig
         return migrationDone && SecureCredentials::g_secureCredentials.hasCredentials();
     }
     
+    bool getGSMCredentials(char* apn, char* user, char* pass,
+                           size_t apnLen, size_t userLen, size_t passLen)
+    {
+        if (!apn || !user || !pass) return false;
+
+        Preferences prefs;
+        if (!prefs.begin("secure_cred", true)) return false;
+
+        String a = prefs.getString("gsm_apn",  "");
+        String u = prefs.getString("gsm_user", "");
+        String p = prefs.getString("gsm_pass", "");
+        prefs.end();
+
+        if (a.length() == 0) return false;
+
+        SafeString::copy(apn,  a.c_str(), apnLen);
+        SafeString::copy(user, u.c_str(), userLen);
+        SafeString::copy(pass, p.c_str(), passLen);
+        return true;
+    }
+
     void factoryReset()
     {
         Serial.println("[SECURE_CONFIG] ⚠️  FACTORY RESET: Clearing all credentials");

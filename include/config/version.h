@@ -4,12 +4,12 @@
  * @file version.h
  * @brief Firmware version information and build metadata
  * @author Rivot Motors
- * @date 2025
+ * @date 2026
  */
 
-#define FIRMWARE_VERSION "2.4.0"
+#define FIRMWARE_VERSION "2.5.0"
 #define FIRMWARE_VERSION_MAJOR 2
-#define FIRMWARE_VERSION_MINOR 4
+#define FIRMWARE_VERSION_MINOR 5
 #define FIRMWARE_VERSION_PATCH 0
 
 #define CHARGER_MODEL "RIVOT_100A"
