@@ -4,9 +4,11 @@
 #include "esp_err.h" // for esp_err_to_name()
 #include <MicroOcpp.h>
 #include "ocpp/ocpp_client.h"
+#include "modules/system_state.h"
 
 // ====== UI States ======
 static bool uiInitialized = false;
+static int userChoice = 0;
 
 // ====== Utility: print bytes ======
 void printBytes(const uint8_t *data, uint8_t len)
@@ -79,13 +81,15 @@ void printDecodedData()
         return;
     }
 
-    if (!batteryConnected)
+    auto snap = SystemState::instance().snapshot();
+
+    if (!snap.batteryConnected)
     {
         printNoBatteryScreen();
         return;
     }
 
-    if (!chargingswitch)
+    if (!snap.chargingSwitch)
     {
         printSwitchOffAlert();
         return;
@@ -98,30 +102,27 @@ void printDecodedData()
         return;
     }
 
-    // printMenu();
-
     if (userChoice == 1)
     {
         Serial.printf("[BMS→CCS] Vmax=%.2fV Imax=%.2fA Switch=%s Mode=%s\n",
-                      BMS_Vmax, BMS_Imax,
-                      chargingswitch ? "YES" : "NO",
-                      heating ? "HEATING" : "CHARGING");
+                      snap.BMS_Vmax, snap.BMS_Imax,
+                      snap.chargingSwitch ? "YES" : "NO",
+                      snap.heating ? "HEATING" : "CHARGING");
         Serial.print("Raw BMS Data: ");
         printBytes(lastBMSData, 8);
-        // ====== Charger Feedback ======
     }
     else if (userChoice == 2)
     {
         Serial.print("Charger Status: ");
         Serial.println(chargerStatus);
-        Serial.printf("Charger Vmax: %.2f V  Charger Imax: %.2f A\n", Charger_Vmax, Charger_Imax);
+        Serial.printf("Charger Vmax: %.2f V  Charger Imax: %.2f A\n", snap.Charger_Vmax, snap.Charger_Imax);
         Serial.print("Raw Charger Data: ");
         printBytes(lastStatusData, 8);
     }
     else if (userChoice == 3)
     {
         Serial.printf("Output Voltage: %.2f V  Output Current: %.2f A  Temp: %.2f °C\n",
-                      chargerVolt, chargerCurr, chargerTemp);
+                      snap.chargerVolt, snap.chargerCurr, snap.chargerTemp);
         Serial.print("Raw Output Data V: ");
         printBytes(lastBattData, 8);
         Serial.print("Raw Output Data I: ");
@@ -132,23 +133,23 @@ void printDecodedData()
     else if (userChoice == 4)
     {
         Serial.printf("Terminal Voltage: %.2f V  Terminal Current: %.2f A  Power: %.2f W\n",
-                      terminalVolt, terminalCurr, terminalchargerPower);
+                      snap.terminalVolt, snap.terminalCurr, snap.terminalPower);
         Serial.print("Terminal Status: ");
         Serial.println(terminalStatus);
         Serial.print("Raw Terminal Data 1: ");
         printBytes(lastTermData1, 8);
         Serial.print("Raw Terminal Data 2: ");
         printBytes(lastTermData2, 8);
-        Serial.printf("Accumulated Energy: %.2f Wh\n", energyWh);
+        Serial.printf("Accumulated Energy: %.2f Wh\n", snap.energyWh);
     }
     else if (userChoice == 5)
     {
         Serial.println("=========== ALL DATA ===========");
-        Serial.printf("[BMS] Vmax=%.2fV Imax=%.2fA\n", BMS_Vmax, BMS_Imax);
-        Serial.printf("[Charger] Vmax=%.2fV Imax=%.2fA\n", Charger_Vmax, Charger_Imax);
-        Serial.printf("[Output] V=%.2fV I=%.2fA T=%.2fC\n", chargerVolt, chargerCurr, chargerTemp);
-        Serial.printf("[Terminal] V=%.2fV I=%.2fA P=%.2fW\n", terminalVolt, terminalCurr, terminalchargerPower);
-        Serial.printf("Accumulated Energy: %.2f Wh\n", energyWh);
+        Serial.printf("[BMS] Vmax=%.2fV Imax=%.2fA\n", snap.BMS_Vmax, snap.BMS_Imax);
+        Serial.printf("[Charger] Vmax=%.2fV Imax=%.2fA\n", snap.Charger_Vmax, snap.Charger_Imax);
+        Serial.printf("[Output] V=%.2fV I=%.2fA T=%.2fC\n", snap.chargerVolt, snap.chargerCurr, snap.chargerTemp);
+        Serial.printf("[Terminal] V=%.2fV I=%.2fA P=%.2fW\n", snap.terminalVolt, snap.terminalCurr, snap.terminalPower);
+        Serial.printf("Accumulated Energy: %.2f Wh\n", snap.energyWh);
         Serial.print("Raw BMS: ");
         printBytes(lastBMSData, 8);
         Serial.print("Raw Charger: ");
@@ -175,6 +176,7 @@ void processSerialInput()
     if (!Serial.available())
         return;
     char c = (char)Serial.read();
+    auto& state = SystemState::instance();
 
     switch (c)
     {
@@ -199,19 +201,19 @@ void processSerialInput()
     case 's':
     case 'S':
         Serial.println("\n🔌 MANUAL START requested");
-        if (!ocppInitialized)
+        if (!state.getOcppInitialized())
         {
             Serial.println("⛔ Cannot start: OCPP not initialized");
         }
-        else if (!batteryConnected)
+        else if (!state.getBatteryConnected())
         {
             Serial.println("⛔ Cannot start: No vehicle detected");
         }
-        else if (!bmsSafeToCharge)
+        else if (!state.getBmsSafeToCharge())
         {
             Serial.println("⛔ Cannot start: BMS not ready");
         }
-        else if (transactionActive || ocpp::isTransactionRunningSafe(1))
+        else if (state.getTransactionActive() || ocpp::isTransactionRunningSafe(1))
         {
             Serial.println("⚠️  Transaction already active");
         }
@@ -230,23 +232,23 @@ void processSerialInput()
     case 'T':
         Serial.println("\n🚨 MANUAL STOP requested");
         
-        if (!ocppInitialized)
+        if (!state.getOcppInitialized())
         {
             Serial.println("⚠️  OCPP not initialized - cannot send StopTransaction");
-            chargingEnabled = false;
+            state.setChargingEnabled(false);
             Serial.println("✅ Hardware disabled locally");
         }
-        else if (!transactionActive && !ocpp::isTransactionRunningSafe(1))
+        else if (!state.getTransactionActive() && !ocpp::isTransactionRunningSafe(1))
         {
             Serial.println("ℹ️  No active transaction to stop");
         }
         else
         {
             Serial.println("📤 Sending StopTransaction to server...");
-            Serial.printf("   (txId=%d)\n", activeTransactionId);
+            Serial.printf("   (txId=%d)\n", state.getActiveTransactionId());
             
             // Disable hardware immediately
-            chargingEnabled = false;
+            state.setChargingEnabled(false);
             sendImmediateChargerStop();
             Serial.println("✅ Hardware stopped immediately");
             

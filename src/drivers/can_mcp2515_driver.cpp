@@ -4,16 +4,14 @@
 #include "../../include/health_monitor.h"
 #include "../../include/debug_logger.h"
 #include "../../include/utils/can_status_logger.h"
+#include "../../include/modules/system_state.h"
 #include <SPI.h>
 
 // MCP2515 instance
 static MCP2515 *mcp2515 = nullptr;
 
-// Ring buffer for received messages
-#define MCP2515_RX_BUFFER_SIZE 64
-static CanMessage rxBuffer[MCP2515_RX_BUFFER_SIZE];
-static volatile uint16_t rxHead = 0;
-static volatile uint16_t rxTail = 0;
+// FreeRTOS Queue for received messages (replaces manual ring buffer)
+static QueueHandle_t rxQueue = nullptr;
 
 // Driver status
 static CanMcp2515Status driverStatus = {false, false, 0, 0, 0, 0};
@@ -47,6 +45,17 @@ namespace CAN_MCP2515
         if (mcp2515RecoveryMutex == nullptr)
         {
             mcp2515RecoveryMutex = xSemaphoreCreateMutex();
+        }
+
+        // Create RX queue (thread-safe, replaces volatile ring buffer)
+        if (rxQueue == nullptr)
+        {
+            rxQueue = xQueueCreate(CAN_RX_QUEUE_SIZE, sizeof(CanMessage));
+            if (rxQueue == nullptr)
+            {
+                Serial.println("[CAN2] ❌ Failed to create RX queue!");
+                return false;
+            }
         }
 
         if (mcp2515RecoveryMutex && xSemaphoreTake(mcp2515RecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
@@ -219,12 +228,8 @@ namespace CAN_MCP2515
 
     bool receiveMessage(CanMessage *msg)
     {
-        if (rxHead == rxTail)
-            return false;
-
-        *msg = rxBuffer[rxTail];
-        rxTail = (rxTail + 1) % MCP2515_RX_BUFFER_SIZE;
-        return true;
+        if (rxQueue == nullptr) return false;
+        return xQueueReceive(rxQueue, msg, 0) == pdTRUE;
     }
 
     bool popFrame(RxBufItem &out)
@@ -248,13 +253,14 @@ namespace CAN_MCP2515
 
     void flushRxBuffer()
     {
-        rxHead = rxTail = 0;
+        if (rxQueue != nullptr) xQueueReset(rxQueue);
     }
 
     uint8_t getRxBufferUsage()
     {
-        uint16_t count = (rxHead >= rxTail) ? (rxHead - rxTail) : (MCP2515_RX_BUFFER_SIZE - rxTail + rxHead);
-        return (count * 100) / MCP2515_RX_BUFFER_SIZE;
+        if (rxQueue == nullptr) return 0;
+        UBaseType_t count = uxQueueMessagesWaiting(rxQueue);
+        return (count * 100) / CAN_RX_QUEUE_SIZE;
     }
 
     void resetStatistics()
@@ -439,26 +445,29 @@ void can2_rx_task(void *arg)
                         SafeSerial::println("[CAN2] ✅ Valid BMS message received — error flags cleared");
                     }
 
-                    // Check buffer overflow
-                    uint16_t nextHead = (rxHead + 1) % MCP2515_RX_BUFFER_SIZE;
-                    if (nextHead != rxTail)
-                    {
-                        // Convert can_frame to CanMessage
-                        rxBuffer[rxHead].id = rxId;
-                        rxBuffer[rxHead].dlc = frame.can_dlc;
-                        memcpy(rxBuffer[rxHead].data, frame.data, 8);
-                        rxBuffer[rxHead].extended = (frame.can_id & CAN_EFF_FLAG) != 0;
-                        rxBuffer[rxHead].timestamp_ms = millis();
+                    // Convert can_frame to CanMessage and enqueue
+                    CanMessage canMsg;
+                    canMsg.id = rxId;
+                    canMsg.dlc = frame.can_dlc;
+                    memcpy(canMsg.data, frame.data, 8);
+                    canMsg.extended = (frame.can_id & CAN_EFF_FLAG) != 0;
+                    canMsg.timestamp_ms = millis();
 
-                        rxHead = nextHead;
-                        driverStatus.total_rx_messages++;
-                        driverStatus.last_activity_ms = millis();
-                    }
-                    else
+                    if (rxQueue != nullptr)
                     {
-                        // Buffer full - drop oldest
-                        rxTail = (rxTail + 1) % MCP2515_RX_BUFFER_SIZE;
-                        driverStatus.error_count++;
+                        if (xQueueSend(rxQueue, &canMsg, 0) == pdTRUE)
+                        {
+                            driverStatus.total_rx_messages++;
+                            driverStatus.last_activity_ms = millis();
+                        }
+                        else
+                        {
+                            // Queue full — drop oldest by receiving and re-sending
+                            CanMessage discard;
+                            xQueueReceive(rxQueue, &discard, 0);
+                            xQueueSend(rxQueue, &canMsg, 0);
+                            driverStatus.error_count++;
+                        }
                     }
                 }
 
@@ -477,7 +486,11 @@ void can2_rx_task(void *arg)
                     // Only log critical bus errors once per 30s
                     if (errorFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_RXEP | MCP2515::EFLG_TXEP))
                     {
-                        if (millis() - lastErrorLog > 30000)
+                        // Suppress expected Error Passive logs when probing for a disconnected vehicle
+                        bool isDisconnectedProbing = !SystemState::instance().getBatteryConnected() && 
+                                                     !(errorFlags & MCP2515::EFLG_TXBO);
+
+                        if (!isDisconnectedProbing && (millis() - lastErrorLog > 30000))
                         {
                             uint8_t tec = mcp2515->errorCountTX();
                             uint8_t rec = mcp2515->errorCountRX();
@@ -497,7 +510,7 @@ void can2_rx_task(void *arg)
             xSemaphoreGive(mcp2515RecoveryMutex);
         }
 
-        // prod::g_healthMonitor.feed(); // DISABLED for testing
+        prod::g_healthMonitor.feed();
         
         // Wait for interrupt notification with 100ms timeout (failsafe polling)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));

@@ -206,7 +206,7 @@ void NetworkManager::poll() {
     // ── WebSocket Idle Watchdog (Level 3) ──
     // g_healthMonitor.feed(); // Feed watchdog during every poll - DISABLED for testing
     now = millis();
-    if (isConnected() && ocppInitialized && now - _lastActivityTime >= GSM_WS_IDLE_TIMEOUT_MS) {
+    if (isConnected() && SystemState::instance().getOcppInitialized() && now - _lastActivityTime >= GSM_WS_IDLE_TIMEOUT_MS) {
         Serial.printf("[NET] ⚠️  WebSocket Idle Watchdog: No activity for %d s! Reconnecting...\n",
                       (int)((now - _lastActivityTime) / 1000));
         _lastActivityTime = now; // Reset to avoid constant trigger during reconnect

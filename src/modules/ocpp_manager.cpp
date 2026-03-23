@@ -14,7 +14,7 @@
 #include "../../include/config/secure_config.h"
 #include "../../include/header.h"
 #include "../../include/modules/ota_manager.h"
-#include "../../include/ocpp_state_machine.h"
+// PHASE 4: Removed #include "../../include/ocpp_state_machine.h" — library manages state internally
 #include "../../include/config/certificates.h"
 #include "../../include/modules/network_manager.h"
 #include "../../include/modules/ocpp_connection_helper.h"
@@ -27,19 +27,7 @@
 #include "../../include/modules/ocpp_meter_service.h"
 #include "../../include/modules/system_state.h"
 
-// External globals from main firmware
-extern bool gunPhysicallyConnected;
-extern bool chargingEnabled;
-extern float energyWh;
-extern float terminalVolt;  // FIXED: Use terminal values (real measurements)
-extern float terminalCurr;  // FIXED: Use terminal values (real measurements)
-extern bool batteryConnected;
-extern float batteryAh;
-extern float BMS_Imax;
-extern float chargerTemp;
-extern float socPercent;    // SOC percentage
-extern float rangeKm;       // Range in km
-extern uint8_t vehicleModel;    // Vehicle model (1=Classic, 2=Pro, 3=Max)
+// All state now accessed through SystemState::instance()
 
 // Charger health check
 extern bool isChargerModuleHealthy();
@@ -266,6 +254,107 @@ bool ocpp::init()
     g_transactionManager.begin();
     g_transactionManager.registerConnectorInputs();
 
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 1: Standard MicroOcpp Library Inputs (Production Alignment)
+    // These lambdas are polled by MicroOcpp every loop(). When a fault
+    // is detected, the library AUTOMATICALLY:
+    //   1) Transitions connector to Faulted
+    //   2) Sends StatusNotification(errorCode) to CSMS
+    //   3) Blocks new RemoteStart until fault clears
+    // ═══════════════════════════════════════════════════════════════
+
+    // 1. Over-Temperature Fault
+    addErrorDataInput([]() -> MicroOcpp::ErrorData {
+        auto snap = SystemState::instance().snapshot();
+        if (snap.chargerTemp > ALERT_TEMP_CRITICAL_C) {
+            MicroOcpp::ErrorData err("HighTemperature");
+            err.info = "Charger terminal temperature exceeded safe limit";
+            err.vendorId = "RivotMotors";
+            return err;
+        }
+        return MicroOcpp::ErrorData(nullptr);
+    });
+
+    // 2. Over/Under Voltage Fault
+    addErrorDataInput([]() -> MicroOcpp::ErrorData {
+        auto snap = SystemState::instance().snapshot();
+        if (snap.batteryConnected && snap.terminalVolt > 0.0f) {
+            if (snap.terminalVolt > ALERT_VOLTAGE_MAX_V) {
+                MicroOcpp::ErrorData err("OverVoltage");
+                err.info = "Terminal voltage exceeded maximum";
+                err.vendorId = "RivotMotors";
+                return err;
+            }
+            if (snap.terminalVolt < ALERT_VOLTAGE_MIN_V && snap.chargingEnabled) {
+                MicroOcpp::ErrorData err("UnderVoltage");
+                err.info = "Terminal voltage below minimum during charge";
+                err.vendorId = "RivotMotors";
+                return err;
+            }
+        }
+        return MicroOcpp::ErrorData(nullptr);
+    });
+
+    // 3. BMS Communication Timeout
+    addErrorDataInput([]() -> MicroOcpp::ErrorData {
+        auto snap = SystemState::instance().snapshot();
+        if (snap.transactionActive && (millis() - snap.lastBMS > 5000)) {
+            MicroOcpp::ErrorData err("OtherError");
+            err.info = "BMS CAN communication timeout (>5s)";
+            err.vendorId = "RivotMotors";
+            err.vendorErrorCode = "BMS_TIMEOUT";
+            return err;
+        }
+        return MicroOcpp::ErrorData(nullptr);
+    });
+
+    // 4. Charger Module Offline (CAN lost)
+    addErrorDataInput([]() -> MicroOcpp::ErrorData {
+        if (!isChargerModuleHealthy()) {
+            MicroOcpp::ErrorData err("PowerSwitchFailure");
+            err.info = "Charger module CAN communication lost";
+            err.vendorId = "RivotMotors";
+            return err;
+        }
+        return MicroOcpp::ErrorData(nullptr);
+    });
+
+    Serial.println("[OCPP]   ✓ Standard Error Inputs registered (Temp, Voltage, BMS, Charger)");
+
+    // ═══════════════════════════════════════════════════════════════
+    // Smart Charging: CSMS can send SetChargingProfile to limit amps
+    // Library calls this callback whenever the limit changes.
+    // limitAmps = -1 means "no OCPP limit" → use BMS Imax.
+    // ═══════════════════════════════════════════════════════════════
+    setSmartChargingCurrentOutput([](float limitAmps) {
+        if (limitAmps < 0) {
+            // No OCPP limit defined — use full BMS Imax
+            return;
+        }
+        Serial.printf("[SMART_CHG] ⚡ OCPP current limit: %.1f A\n", limitAmps);
+        // TODO: Forward limitAmps to CAN charger interface for hardware enforcement
+    });
+    Serial.println("[OCPP]   ✓ Smart Charging output registered");
+
+    // ═══════════════════════════════════════════════════════════════
+    // Remote Reset: CSMS can send Reset.req (Hard or Soft)
+    // ═══════════════════════════════════════════════════════════════
+    setOnResetNotify([](bool isHard) -> bool {
+        Serial.printf("[RESET] 🔄 Reset.req received (hard=%d)\n", isHard);
+        if (isTransactionRunning(1)) {
+            Serial.println("[RESET] ❌ Rejected: Transaction in progress");
+            return false;
+        }
+        return true;
+    });
+
+    setOnResetExecute([](bool isHard) {
+        Serial.printf("[RESET] 🔄 Executing %s reset...\n", isHard ? "HARD" : "SOFT");
+        delay(500); // Allow OCPP response to flush
+        esp_restart();
+    });
+    Serial.println("[OCPP]   ✓ Remote Reset handler registered");
+
     // Transaction notifications
     {
         OcppLock lock;
@@ -347,7 +436,7 @@ bool ocpp::init()
     Serial.println("[OCPP] ⏳ Waiting for WebSocket connection and BootNotification...");
     
     // CRITICAL: Set flag to allow loop() to access connector 1
-    ocppInitialized = true;
+    SystemState::instance().setOcppInitialized(true);
 
     return true;
 }
@@ -366,7 +455,7 @@ void ocpp::poll()
 
     // Modular poll loops
     g_meterService.poll();
-    g_transactionManager.syncTransactionState();
+    // PHASE 4: Removed g_transactionManager.syncTransactionState() — library is single source of truth
 
     auto& state = SystemState::instance();
 
@@ -378,9 +467,9 @@ void ocpp::poll()
         lastHealthPoll = millis();
         bool healthy = isChargerModuleHealthy();
         auto snap = state.snapshot();
-        SafeSerial::printf("[SYS] @%lums | SM=%s | Tx=%s | Chg=%s | Healthy=%s | Op=%d\n",
+        SafeSerial::printf("[SYS] @%lums | LibStatus=%d | Tx=%s | Chg=%s | Healthy=%s | Op=%d\n",
                      millis(),
-                     prod::g_ocppStateMachine.getStateName(),
+                     getChargePointStatus(1),
                      snap.transactionActive ? "Active" : "Idle",
                      snap.chargingEnabled ? "ON" : "OFF",
                      healthy ? "YES" : "NO",
@@ -446,7 +535,7 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     else if (model == 2) modelName = "Pro";
     else if (model == 3) modelName = "Max";
 
-    if (!::gunPhysicallyConnected) {
+    if (!SystemState::instance().getGunPhysicallyConnected()) {
         Serial.println("[OCPP] ⚠️  Skip VehicleInfo: Gun not physically connected (waiting for BMS CAN)");
         return;
     }

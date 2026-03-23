@@ -3,11 +3,8 @@
 #include "../../include/config/hardware.h"
 #include "../../include/health_monitor.h"
 
-// Ring buffer for received messages (unified format)
-#define TWAI_RX_BUFFER_SIZE 64
-static CanMessage rxBuffer[TWAI_RX_BUFFER_SIZE];
-static volatile uint16_t rxHead = 0;
-static volatile uint16_t rxTail = 0;
+// FreeRTOS Queue for received messages (replaces manual ring buffer)
+static QueueHandle_t rxQueue = nullptr;
 
 // Driver status
 static CanTwaiStatus driverStatus = {false, false, 0, 0, 0, 0};
@@ -23,6 +20,17 @@ namespace CAN_TWAI
         if (twaiRecoveryMutex == nullptr)
         {
             twaiRecoveryMutex = xSemaphoreCreateMutex();
+        }
+
+        // Create RX queue (thread-safe, replaces volatile ring buffer)
+        if (rxQueue == nullptr)
+        {
+            rxQueue = xQueueCreate(CAN_RX_QUEUE_SIZE, sizeof(CanMessage));
+            if (rxQueue == nullptr)
+            {
+                Serial.println("[CAN1] ❌ Failed to create RX queue!");
+                return false;
+            }
         }
 
         if (twaiRecoveryMutex && xSemaphoreTake(twaiRecoveryMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
@@ -103,12 +111,8 @@ namespace CAN_TWAI
 
     bool receiveMessage(CanMessage *msg)
     {
-        if (rxHead == rxTail)
-            return false;
-
-        *msg = rxBuffer[rxTail];
-        rxTail = (rxTail + 1) % TWAI_RX_BUFFER_SIZE;
-        return true;
+        if (rxQueue == nullptr) return false;
+        return xQueueReceive(rxQueue, msg, 0) == pdTRUE;
     }
 
     bool popFrame(RxBufItem &out)
@@ -132,13 +136,14 @@ namespace CAN_TWAI
 
     void flushRxBuffer()
     {
-        rxHead = rxTail = 0;
+        if (rxQueue != nullptr) xQueueReset(rxQueue);
     }
 
     uint8_t getRxBufferUsage()
     {
-        uint16_t count = (rxHead >= rxTail) ? (rxHead - rxTail) : (TWAI_RX_BUFFER_SIZE - rxTail + rxHead);
-        return (count * 100) / TWAI_RX_BUFFER_SIZE;
+        if (rxQueue == nullptr) return 0;
+        UBaseType_t count = uxQueueMessagesWaiting(rxQueue);
+        return (count * 100) / CAN_RX_QUEUE_SIZE;
     }
 
     void resetStatistics()
@@ -173,33 +178,36 @@ void can1_rx_task(void *arg)
                 esp_err_t err = twai_receive(&msg, pdMS_TO_TICKS(100));
                 if (err == ESP_OK)
                 {
-                    // Check buffer overflow
-                    uint16_t nextHead = (rxHead + 1) % TWAI_RX_BUFFER_SIZE;
-                    if (nextHead != rxTail)
-                    {
-                        // Convert twai_message_t to CanMessage
-                        rxBuffer[rxHead].id = msg.identifier;
-                        rxBuffer[rxHead].dlc = msg.data_length_code;
-                        memcpy(rxBuffer[rxHead].data, msg.data, 8);
-                        rxBuffer[rxHead].extended = (msg.extd != 0);
-                        rxBuffer[rxHead].timestamp_ms = millis();
+                    // Convert twai_message_t to CanMessage and enqueue
+                    CanMessage canMsg;
+                    canMsg.id = msg.identifier;
+                    canMsg.dlc = msg.data_length_code;
+                    memcpy(canMsg.data, msg.data, 8);
+                    canMsg.extended = (msg.extd != 0);
+                    canMsg.timestamp_ms = millis();
 
-                        rxHead = nextHead;
-                        driverStatus.total_rx_messages++;
-                        driverStatus.last_activity_ms = millis();
-                    }
-                    else
+                    if (rxQueue != nullptr)
                     {
-                        // Buffer full - drop oldest
-                        rxTail = (rxTail + 1) % TWAI_RX_BUFFER_SIZE;
-                        driverStatus.error_count++;
+                        if (xQueueSend(rxQueue, &canMsg, 0) == pdTRUE)
+                        {
+                            driverStatus.total_rx_messages++;
+                            driverStatus.last_activity_ms = millis();
+                        }
+                        else
+                        {
+                            // Queue full — drop oldest by receiving and re-sending
+                            CanMessage discard;
+                            xQueueReceive(rxQueue, &discard, 0);
+                            xQueueSend(rxQueue, &canMsg, 0);
+                            driverStatus.error_count++;
+                        }
                     }
                 }
             }
             xSemaphoreGive(twaiRecoveryMutex);
         }
 
-        // prod::g_healthMonitor.feed(); // DISABLED for testing
+        prod::g_healthMonitor.feed();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

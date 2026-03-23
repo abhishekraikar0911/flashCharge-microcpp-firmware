@@ -7,17 +7,18 @@ namespace prod {
 
 /**
  * @file ocpp_transaction_manager.h
- * @brief Handles OCPP transaction lifecycle, safety validation, and state tracking.
+ * @brief Handles OCPP transaction lifecycle and state tracking.
+ * 
+ * PHASE 3: Simplified — validation is now handled by MicroOcpp's
+ * addErrorDataInput() which blocks transactions when faults are active.
+ * syncTransactionState() removed — library is the single source of truth.
  */
 class OcppTransactionManager {
 public:
     void begin();
     void registerConnectorInputs();
     
-    // Safety validation for RemoteStart
-    bool validateRemoteStart(const char* idTag);
-    
-    // Notification Handlers
+    // Notification Handlers (called by setTxNotificationOutput)
     void handleRemoteStart(MicroOcpp::Transaction* tx);
     void handleStartTx(MicroOcpp::Transaction* tx);
     void handleRemoteStop(MicroOcpp::Transaction* tx);
@@ -26,21 +27,11 @@ public:
     // State Getters
     bool isStopTxPending() const { return _stopTxPending; }
     void clearStopTxPending() { _stopTxPending = false; }
-    
-    // Transaction Sync Logic (Move from poll())
-    void syncTransactionState();
 
 private:
     bool _stopTxPending = false;
     unsigned long _txStartTime = 0;
     unsigned long _txStopTime = 0;
-    
-    // Internal safety checks
-    bool checkBmsSafety();
-    bool checkVoltageRange();
-    bool checkTemperature();
-    bool checkChargerHealth();
-    bool checkFaultLock();
 };
 
 extern OcppTransactionManager g_transactionManager;

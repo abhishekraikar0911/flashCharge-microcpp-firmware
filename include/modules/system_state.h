@@ -89,6 +89,8 @@ struct StateSnapshot {
 
 // ═══════════════════════════════════════════════════════════════
 // SystemState Singleton — thread-safe wrapper around StateSnapshot
+// All getters/setters operate exclusively on the internal _data struct.
+// No extern globals are referenced — SystemState is the single source of truth.
 // ═══════════════════════════════════════════════════════════════
 class SystemState {
 public:
@@ -109,75 +111,75 @@ public:
 
     // ═══════════════════════════════════════════════════════════
     // Individual Getters / Setters (auto-lock)
-    // For hot-path variables that change frequently.
+    // Single source of truth — no extern global bridges.
     // ═══════════════════════════════════════════════════════════
 
     // --- Charger Module ---
-    float getTerminalVolt()  { extern float terminalVolt; return terminalVolt; }
-    void  setTerminalVolt(float v) { extern float terminalVolt; terminalVolt = v; Lock l(_mutex); _data.terminalVolt = v; }
+    float getTerminalVolt()  { Lock l(_mutex); return _data.terminalVolt; }
+    void  setTerminalVolt(float v) { Lock l(_mutex); _data.terminalVolt = v; }
 
-    float getTerminalCurr()  { extern float terminalCurr; return terminalCurr; }
-    void  setTerminalCurr(float v) { extern float terminalCurr; terminalCurr = v; Lock l(_mutex); _data.terminalCurr = v; }
+    float getTerminalCurr()  { Lock l(_mutex); return _data.terminalCurr; }
+    void  setTerminalCurr(float v) { Lock l(_mutex); _data.terminalCurr = v; }
 
-    float getChargerTemp()   { extern float chargerTemp; return chargerTemp; }
-    void  setChargerTemp(float v) { extern float chargerTemp; chargerTemp = v; Lock l(_mutex); _data.chargerTemp = v; }
+    float getChargerTemp()   { Lock l(_mutex); return _data.chargerTemp; }
+    void  setChargerTemp(float v) { Lock l(_mutex); _data.chargerTemp = v; }
 
-    float getTerminalPower() { extern float terminalchargerPower; return terminalchargerPower; }
-    void  setTerminalPower(float v) { extern float terminalchargerPower; terminalchargerPower = v; Lock l(_mutex); _data.terminalPower = v; }
+    float getTerminalPower() { Lock l(_mutex); return _data.terminalPower; }
+    void  setTerminalPower(float v) { Lock l(_mutex); _data.terminalPower = v; }
 
-    float getChargerVolt()   { extern float chargerVolt; return chargerVolt; }
-    void  setChargerVolt(float v) { extern float chargerVolt; chargerVolt = v; Lock l(_mutex); _data.chargerVolt = v; }
+    float getChargerVolt()   { Lock l(_mutex); return _data.chargerVolt; }
+    void  setChargerVolt(float v) { Lock l(_mutex); _data.chargerVolt = v; }
 
-    float getChargerCurr()   { extern float chargerCurr; return chargerCurr; }
-    void  setChargerCurr(float v) { extern float chargerCurr; chargerCurr = v; Lock l(_mutex); _data.chargerCurr = v; }
+    float getChargerCurr()   { Lock l(_mutex); return _data.chargerCurr; }
+    void  setChargerCurr(float v) { Lock l(_mutex); _data.chargerCurr = v; }
 
     // --- BMS ---
-    float getSocPercent()    { extern float socPercent; return socPercent; }
-    void  setSocPercent(float v) { extern float socPercent; socPercent = v; Lock l(_mutex); _data.socPercent = v; }
+    float getSocPercent()    { Lock l(_mutex); return _data.socPercent; }
+    void  setSocPercent(float v) { Lock l(_mutex); _data.socPercent = v; }
 
-    float getRangeKm()       { extern float rangeKm; return rangeKm; }
-    void  setRangeKm(float v) { extern float rangeKm; rangeKm = v; Lock l(_mutex); _data.rangeKm = v; }
+    float getRangeKm()       { Lock l(_mutex); return _data.rangeKm; }
+    void  setRangeKm(float v) { Lock l(_mutex); _data.rangeKm = v; }
 
-    float getBatteryAh()     { extern float batteryAh; return batteryAh; }
-    void  setBatteryAh(float v) { extern float batteryAh; batteryAh = v; Lock l(_mutex); _data.batteryAh = v; }
+    float getBatteryAh()     { Lock l(_mutex); return _data.batteryAh; }
+    void  setBatteryAh(float v) { Lock l(_mutex); _data.batteryAh = v; }
 
-    float getBMS_Vmax()      { extern float BMS_Vmax; return BMS_Vmax; }
-    void  setBMS_Vmax(float v) { extern float BMS_Vmax; BMS_Vmax = v; Lock l(_mutex); _data.BMS_Vmax = v; }
+    float getBMS_Vmax()      { Lock l(_mutex); return _data.BMS_Vmax; }
+    void  setBMS_Vmax(float v) { Lock l(_mutex); _data.BMS_Vmax = v; }
 
-    float getBMS_Imax()      { extern float BMS_Imax; return BMS_Imax; }
-    void  setBMS_Imax(float v) { extern float BMS_Imax; BMS_Imax = v; Lock l(_mutex); _data.BMS_Imax = v; }
+    float getBMS_Imax()      { Lock l(_mutex); return _data.BMS_Imax; }
+    void  setBMS_Imax(float v) { Lock l(_mutex); _data.BMS_Imax = v; }
 
-    float getCharger_Vmax()  { extern float Charger_Vmax; return Charger_Vmax; }
-    void  setCharger_Vmax(float v) { extern float Charger_Vmax; Charger_Vmax = v; Lock l(_mutex); _data.Charger_Vmax = v; }
+    float getCharger_Vmax()  { Lock l(_mutex); return _data.Charger_Vmax; }
+    void  setCharger_Vmax(float v) { Lock l(_mutex); _data.Charger_Vmax = v; }
 
-    float getCharger_Imax()  { extern float Charger_Imax; return Charger_Imax; }
-    void  setCharger_Imax(float v) { extern float Charger_Imax; Charger_Imax = v; Lock l(_mutex); _data.Charger_Imax = v; }
+    float getCharger_Imax()  { Lock l(_mutex); return _data.Charger_Imax; }
+    void  setCharger_Imax(float v) { Lock l(_mutex); _data.Charger_Imax = v; }
 
-    uint8_t getVehicleModel() { extern uint8_t vehicleModel; return vehicleModel; }
-    void    setVehicleModel(uint8_t v) { extern uint8_t vehicleModel; vehicleModel = v; Lock l(_mutex); _data.vehicleModel = v; }
+    uint8_t getVehicleModel() { Lock l(_mutex); return _data.vehicleModel; }
+    void    setVehicleModel(uint8_t v) { Lock l(_mutex); _data.vehicleModel = v; }
 
-    float getBatterySoc()    { extern float batterySoc; return batterySoc; }
-    void  setBatterySoc(float v) { extern float batterySoc; batterySoc = v; Lock l(_mutex); _data.batterySoc = v; }
+    float getBatterySoc()    { Lock l(_mutex); return _data.batterySoc; }
+    void  setBatterySoc(float v) { Lock l(_mutex); _data.batterySoc = v; }
 
-    float getTotalChargingAh() { extern float totalChargingAh; return totalChargingAh; }
-    void  setTotalChargingAh(float v) { extern float totalChargingAh; totalChargingAh = v; Lock l(_mutex); _data.totalChargingAh = v; }
+    float getTotalChargingAh() { Lock l(_mutex); return _data.totalChargingAh; }
+    void  setTotalChargingAh(float v) { Lock l(_mutex); _data.totalChargingAh = v; }
 
-    float getTotalDischargingAh() { extern float totalDischargingAh; return totalDischargingAh; }
-    void  setTotalDischargingAh(float v) { extern float totalDischargingAh; totalDischargingAh = v; Lock l(_mutex); _data.totalDischargingAh = v; }
+    float getTotalDischargingAh() { Lock l(_mutex); return _data.totalDischargingAh; }
+    void  setTotalDischargingAh(float v) { Lock l(_mutex); _data.totalDischargingAh = v; }
 
     // --- Connection / Plug ---
-    bool getBatteryConnected()  { extern bool batteryConnected; return batteryConnected; }
-    void setBatteryConnected(bool v) { extern bool batteryConnected; batteryConnected = v; Lock l(_mutex); _data.batteryConnected = v; }
+    bool getBatteryConnected()  { Lock l(_mutex); return _data.batteryConnected; }
+    void setBatteryConnected(bool v) { Lock l(_mutex); _data.batteryConnected = v; }
 
-    bool getGunPhysicallyConnected()  { extern bool gunPhysicallyConnected; return gunPhysicallyConnected; }
-    void setGunPhysicallyConnected(bool v) { extern bool gunPhysicallyConnected; gunPhysicallyConnected = v; Lock l(_mutex); _data.gunPhysicallyConnected = v; }
+    bool getGunPhysicallyConnected()  { Lock l(_mutex); return _data.gunPhysicallyConnected; }
+    void setGunPhysicallyConnected(bool v) { Lock l(_mutex); _data.gunPhysicallyConnected = v; }
 
-    bool getVehicleConfirmed()  { extern bool vehicleConfirmed; return vehicleConfirmed; }
-    void setVehicleConfirmed(bool v) { extern bool vehicleConfirmed; vehicleConfirmed = v; Lock l(_mutex); _data.vehicleConfirmed = v; }
+    bool getVehicleConfirmed()  { Lock l(_mutex); return _data.vehicleConfirmed; }
+    void setVehicleConfirmed(bool v) { Lock l(_mutex); _data.vehicleConfirmed = v; }
 
     // --- BMS Safety ---
-    bool getBmsSafeToCharge()   { extern bool bmsSafeToCharge; return bmsSafeToCharge; }
-    void setBmsSafeToCharge(bool v) { extern bool bmsSafeToCharge; bmsSafeToCharge = v; Lock l(_mutex); _data.bmsSafeToCharge = v; }
+    bool getBmsSafeToCharge()   { Lock l(_mutex); return _data.bmsSafeToCharge; }
+    void setBmsSafeToCharge(bool v) { Lock l(_mutex); _data.bmsSafeToCharge = v; }
 
     bool getBmsHeatingActive()  { Lock l(_mutex); return _data.bmsHeatingActive; }
     void setBmsHeatingActive(bool v) { Lock l(_mutex); _data.bmsHeatingActive = v; }
@@ -193,12 +195,7 @@ public:
     void setChargingEnabled(bool v) { 
         Lock l(_mutex); 
         _data.chargingEnabled = v; 
-        
-        // BRIDGE: Update legacy global for CAN driver compatibility
-        extern bool chargingEnabled;
-        chargingEnabled = v;
-        
-        Serial.printf("[STATE] ⚡ chargingEnabled -> %s (bridged to global)\n", v ? "START" : "STOP");
+        Serial.printf("[STATE] ⚡ chargingEnabled -> %s\n", v ? "START" : "STOP");
     }
 
     float getEnergyWh()         { Lock l(_mutex); return _data.energyWh; }
@@ -237,12 +234,7 @@ public:
 
     // --- Timestamps ---
     unsigned long getLastBMS()  { Lock l(_mutex); return _data.lastBMS; }
-    void setLastBMS(unsigned long v) { 
-        extern unsigned long lastBMS;
-        lastBMS = v;
-        Lock l(_mutex); 
-        _data.lastBMS = v; 
-    }
+    void setLastBMS(unsigned long v) { Lock l(_mutex); _data.lastBMS = v; }
 
     unsigned long getLastHeartbeat()  { Lock l(_mutex); return _data.lastHeartbeat; }
     void setLastHeartbeat(unsigned long v) { Lock l(_mutex); _data.lastHeartbeat = v; }

@@ -26,86 +26,30 @@ extern SemaphoreHandle_t dataMutex;
 extern SemaphoreHandle_t serialMutex;
 
 // =========================================================
-// SHARED STATE VARIABLES
+// CAN DIAGNOSTIC BUFFERS (Raw protocol data)
 // =========================================================
-extern bool vehicleConfirmed;
-extern bool gunPhysicallyConnected;
-
-extern float energyWh;
-extern bool batteryConnected;
-extern bool chargingEnabled;
-extern bool chargingswitch;
-
-// BMS Safety flags
-extern bool bmsSafeToCharge;  // TRUE only when byte4=0x00
-extern bool bmsHeatingActive;  // TRUE when byte5=0x01
-
-extern float BMS_Vmax, BMS_Imax;
-extern float Charger_Vmax, Charger_Imax;
-extern float chargerVolt, chargerCurr, chargerTemp, terminalchargerPower;
-extern float terminalVolt, terminalCurr;
-extern float socPercent;
-extern float rangeKm;
-extern uint8_t vehicleModel;  // 0=Unknown, 1=Classic, 2=Pro, 3=Max
-extern float batteryAh;
-extern float batterySoc;
-extern float totalChargingAh;    // NEW: Total charging Ah (lifetime)
-extern float totalDischargingAh; // NEW: Total discharging Ah (lifetime)
-
-extern uint16_t metric79_raw;
-extern float metric79_scaled;
-extern uint32_t metric83_raw;
-extern float metric83_scaled;
-
-extern unsigned long lastBMS;
-extern uint8_t heating;
-extern unsigned long lastHeartbeat;
-extern unsigned long lastChargerResponse;
-extern unsigned long lastTerminalPower;  // NEW: Track terminal data CAN messages
-extern unsigned long lastTerminalStatus; // NEW: Track terminal status CAN messages
-
-extern const char *chargerStatus;
-extern const char *terminalchargerStatus;
-extern const char *terminalStatus;
-
-extern int userChoice;
-extern unsigned long lastPrint;
-extern uint8_t stopCmd;
-
-// Session lock
-extern bool sessionActive;
-
-// OCPP initialization status
-extern bool ocppInitialized;
-
-// =========================================================
-// FAULT STABILIZATION GUARD (Production Safety)
-// =========================================================
-extern bool faultLockActive;        // TRUE when fault occurred, blocks new RemoteStart
-extern unsigned long faultLockTime; // Timestamp when fault lock was set
-
-// =========================================================
-// TRANSACTION GATE (FIX 1 - HARD GATE)
-// =========================================================
-extern bool transactionActive;      // TRUE only when valid transaction running
-extern int activeTransactionId;     // Valid transaction ID (>0)
-extern bool remoteStartAccepted;    // TRUE only after RemoteStart accepted
-extern char persistedIdTag[32];     // NEW: Restored IdTag for library re-hydration
-extern unsigned long txStartTime;   // Transaction start timestamp (millis)
-extern unsigned long txStopTime;    // Transaction stop timestamp (millis)
-
-// Transaction state (for safe MeterValues) - UNUSED
-// extern bool transactionActive;
-// extern int currentTransactionId;
-
-// Buffers
 extern uint8_t lastData[8], lastBMSData[8], lastStatusData[8], lastHData[8];
 extern uint8_t lastVmaxData[8], lastImaxData[8], lastBattData[8];
 extern uint8_t lastVoltData[8], lastCurrData[8], lastTempData[8];
 extern uint8_t lastTermData1[8], lastTermData2[8];
 
+// CAN RAW PROTOCOL VALUES (Charger Module format)
 extern uint32_t cachedRawV;
 extern uint32_t cachedRawI;
+
+// CAN-LEVEL STATUS STRINGS (diagnostic only)
+extern const char *chargerStatus;
+extern const char *terminalchargerStatus;
+extern const char *terminalStatus;
+
+// CAN PROTOCOL METRICS (diagnostic only)
+extern uint16_t metric79_raw;
+extern float metric79_scaled;
+extern uint32_t metric83_raw;
+extern float metric83_scaled;
+
+// CAN Update Flag
+extern volatile bool updateCAN;
 
 // =========================================================
 // STRUCTURES
@@ -131,19 +75,14 @@ struct Group
     uint8_t funcIndex;
 };
 
-// CAN Update Flag
-extern volatile bool updateCAN;
-
 // Groups
 extern Group groups[];
 
 // =========================================================
-// CHARGER HEALTH MONITORING
+// FUNCTION DECLARATIONS
 // =========================================================
-extern bool chargerModuleOnline;  // NEW: Charger module communication status
-extern bool canRecoveryActive;     // NEW: CAN bus recovery in progress (disables voltage-drop disconnect)
-bool isChargerModuleHealthy();     // NEW: Check if charger is responding
-void notifyChargerFault(bool faulted); // NEW: Notify OCPP about charger fault
+bool isChargerModuleHealthy();
+void notifyChargerFault(bool faulted);
 void initGlobals();
 void can1_rx_task(void *arg);  // CAN1 - ISO1050 - Charger
 void can2_rx_task(void *arg);  // CAN2 - MCP2515 - BMS
@@ -157,7 +96,7 @@ bool popFrame(RxBufItem &out);
 void pushFrame(const twai_message_t &msg);
 void sendGroupRequest(Group &g);
 void sendChargerFeedback();
-void sendImmediateChargerStop();  // NEW: Immediate hardware stop for RemoteStop safety
+void sendImmediateChargerStop();
 
 void printDecodedData();
 void printMenu();

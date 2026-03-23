@@ -195,7 +195,7 @@ bool GSMManager::stepNetworkRegistered(uint32_t timeoutMs) {
     bool registered = false;
 
     while (millis() - startTime < timeoutMs) {
-        // g_healthMonitor.feed(); // Feed watchdog during long registration wait - DISABLED
+        g_healthMonitor.feed(); // Feed watchdog during long registration wait
         RegStatus regStatus = _modem.getRegistrationStatus();
         if (regStatus == REG_OK_HOME || regStatus == REG_OK_ROAMING) {
             registered = true;
@@ -345,13 +345,13 @@ void GSMManager::hardReset() {
     delay(400); 
     digitalWrite(GSM_RESET_PIN, LOW);
     
-    // g_healthMonitor.feed(); // DISABLED
+    g_healthMonitor.feed();
 
     // Wait for power stabilization and boot
     Serial.println("[GSM] ⏳ Waiting 10s for modem stabilization...");
     for (int i=0; i<10; i++) {
         delay(1000);
-        // g_healthMonitor.feed(); // DISABLED
+        g_healthMonitor.feed();
     }
 }
 
@@ -419,12 +419,12 @@ float GSMManager::getSupplyVoltage() {
 bool GSMManager::waitForAT(uint32_t timeoutMs) {
     uint32_t start = millis();
     while (millis() - start < timeoutMs) {
-        // g_healthMonitor.feed(); // Feed watchdog during AT wait - DISABLED
+        g_healthMonitor.feed(); // Feed watchdog during AT wait
         if (_modem.testAT()) {
             return true;
         }
         delay(200); // Check more frequently
-        // g_healthMonitor.feed(); // DISABLED
+        g_healthMonitor.feed();
     }
     return false;
 }

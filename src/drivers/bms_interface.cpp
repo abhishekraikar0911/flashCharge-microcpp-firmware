@@ -11,6 +11,7 @@
 static uint8_t buildStatusFlags()
 {
     uint8_t flags = 0;
+    auto snap = SystemState::instance().snapshot();
     
     // Bit0: Hardware failure (0: Normal. 1: Hardware Failure)
     if (!isChargerModuleHealthy()) {
@@ -18,7 +19,7 @@ static uint8_t buildStatusFlags()
     }
     
     // Bit1: Over temperature (0: Normal. 1: Over temperature protection)
-    if (chargerTemp > 70.0f) {
+    if (snap.chargerTemp > 70.0f) {
         flags |= 0x02;
     }
     
@@ -26,12 +27,12 @@ static uint8_t buildStatusFlags()
     // Need a specific signal for this, keeping 0 (Normal) for now.
     
     // Bit3: Starting state (0: Connected. 1: Not connected/reversed)
-    if (!batteryConnected) {
+    if (!snap.batteryConnected) {
         flags |= 0x08;
     }
     
     // Bit4: Communication State (0: Normal. 1: Timeout)
-    if ((millis() - lastBMS) > 5000) {
+    if ((millis() - snap.lastBMS) > 5000) {
         flags |= 0x10;
     }
     
@@ -47,6 +48,7 @@ void requestSOCFromBMS()
 void sendChargerFeedback()
 {
     auto snap = SystemState::instance().snapshot();
+
     uint8_t data[8] = {0};
 
     // BYTE1-2: Output Voltage (Big-Endian, 0.1V/bit)
@@ -99,16 +101,16 @@ void handleBMSMessage(const twai_message_t &msg)
     LOG_BMS("[CAN2-RX] 0x1806E5F4: %02X %02X %02X %02X %02X %02X %02X %02X",
             msg.data[0], msg.data[1], msg.data[2], msg.data[3],
             msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
-    LOG_BMS("Vmax=%.1fV Imax=%.1fA Switch=%s Heating=%s", BMS_Vmax, BMS_Imax, 
-            chargingswitch ? "ON" : "OFF", heating ? "YES" : "NO");
+    auto snap = SystemState::instance().snapshot();
+    LOG_BMS("Vmax=%.1fV Imax=%.1fA Switch=%s Heating=%s", snap.BMS_Vmax, snap.BMS_Imax, 
+            snap.chargingSwitch ? "ON" : "OFF", snap.heating ? "YES" : "NO");
 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         using namespace can_utils;
+        auto& state = SystemState::instance();
 
         // PLAUSIBILITY GUARD: Only mark vehicle present if reported voltage is realistic.
-        // Vmax is in bytes 0-1 as big-endian, 0.1V/bit. A real battery pack >= 20V.
-        // This filters out CAN bus noise/echoes (~1.3V) that arrive when no EV is connected.
         const uint16_t vmax_preview = (((uint16_t)msg.data[0]) << 8) | msg.data[1];
         const float vmax_float = vmax_preview / 10.0f;
         if (vmax_float < 20.0f) {
@@ -117,11 +119,9 @@ void handleBMSMessage(const twai_message_t &msg)
             return;
         }
 
-        batteryConnected = true;
-        gunPhysicallyConnected = true;
-        SystemState::instance().setBatteryConnected(true);
-        SystemState::instance().setGunPhysicallyConnected(true);
-        SystemState::instance().setLastBMS(millis());
+        state.setBatteryConnected(true);
+        state.setGunPhysicallyConnected(true);
+        state.setLastBMS(millis());
 
         const uint16_t vmax_raw = parseBEUint16(&msg.data[0]);
         const uint16_t imax_raw = parseBEUint16(&msg.data[2]);
@@ -133,57 +133,54 @@ void handleBMSMessage(const twai_message_t &msg)
             return;
         }
 
-        // Vehicle confirmed valid — update state
-        lastBMS = millis();
-
         const uint8_t dlc = msg.data_length_code;
         memcpy(lastBMSData, msg.data, dlc > 8 ? 8 : dlc);
 
         // Individual field validation
         if (vmax_raw <= 1500 && imax_raw <= 2000) {
-            BMS_Vmax = vmax_raw / 10.0f;
-            BMS_Imax = imax_raw / 10.0f;
+            float bmsVmax = vmax_raw / 10.0f;
+            float bmsImax = imax_raw / 10.0f;
             
             // CRITICAL FIX: Validate parsed values
-            if (!CANValidator::validateVoltage(BMS_Vmax))
+            if (!CANValidator::validateVoltage(bmsVmax))
             {
-                LOG_BMS("⚠️  Invalid BMS_Vmax: %.1fV", BMS_Vmax);
-                BMS_Vmax = 0.0f;
+                LOG_BMS("⚠️  Invalid BMS_Vmax: %.1fV", bmsVmax);
+                bmsVmax = 0.0f;
             }
-            if (!CANValidator::validateCurrent(BMS_Imax))
+            if (!CANValidator::validateCurrent(bmsImax))
             {
-                LOG_BMS("⚠️  Invalid BMS_Imax: %.1fA", BMS_Imax);
-                BMS_Imax = 0.0f;
+                LOG_BMS("⚠️  Invalid BMS_Imax: %.1fA", bmsImax);
+                bmsImax = 0.0f;
             }
             
-            SystemState::instance().setBMS_Vmax(BMS_Vmax);
-            SystemState::instance().setBMS_Imax(BMS_Imax);
+            state.setBMS_Vmax(bmsVmax);
+            state.setBMS_Imax(bmsImax);
 
             // CRITICAL: Map BMS limits to Charger Module raw format
-            // cachedRawV = float * 1024 (Charger spec)
-            // cachedRawI = float * 30.5 (Charger spec)
-            cachedRawV = (uint32_t)(BMS_Vmax * 1024.0f);
-            cachedRawI = (uint32_t)(BMS_Imax * 30.5f);
+            cachedRawV = (uint32_t)(bmsVmax * 1024.0f);
+            cachedRawI = (uint32_t)(bmsImax * 30.5f);
         }
         
         // Diagnostic: Log raw and calculated values
         static unsigned long lastBmsLog = 0;
         if (millis() - lastBmsLog > 5000) {
+            float bv = state.getBMS_Vmax();
+            float bi = state.getBMS_Imax();
             LOG_BMS("BMS: Vmax=%.1fV Imax=%.1fA (raw: 0x%04X, 0x%04X)",
-                BMS_Vmax, BMS_Imax, vmax_raw, imax_raw);
+                bv, bi, vmax_raw, imax_raw);
             lastBmsLog = millis();
         }
 
-        // SAFETY: Parse charging permission flags (only if frame is not garbage)
+        // SAFETY: Parse charging permission flags
         bool newSafeToCharge = (msg.data[4] == 0x00);
-        if (newSafeToCharge != bmsSafeToCharge) {
-            LOG_BMS("BMS Safety: %s -> %s", bmsSafeToCharge ? "ENABLED" : "DISABLED", newSafeToCharge ? "ENABLED" : "DISABLED");
-            bmsSafeToCharge = newSafeToCharge;
-            SystemState::instance().setBmsSafeToCharge(bmsSafeToCharge);
+        bool curSafe = state.getBmsSafeToCharge();
+        if (newSafeToCharge != curSafe) {
+            LOG_BMS("BMS Safety: %s -> %s", curSafe ? "ENABLED" : "DISABLED", newSafeToCharge ? "ENABLED" : "DISABLED");
+            state.setBmsSafeToCharge(newSafeToCharge);
         }
 
-        chargingswitch = (msg.data[4] == 0x00);
-        heating = (msg.data[5] == 0x01);
+        state.setChargingSwitch(msg.data[4] == 0x00);
+        state.setHeating(msg.data[5] == 0x01 ? 1 : 0);
 
         xSemaphoreGive(dataMutex);
     }
@@ -233,10 +230,11 @@ void handleSOCMessage(const twai_message_t &msg)
             // Update battery Ah and range based on SOC
             float maxCapacityAh;
             uint8_t newModel;
-            if (BMS_Imax > 60.0f) {
+            float bmsImax = SystemState::instance().getBMS_Imax();
+            if (bmsImax > 60.0f) {
                 maxCapacityAh = 90.0f;
                 newModel = 3;
-            } else if (BMS_Imax > 30.0f) {
+            } else if (bmsImax > 30.0f) {
                 maxCapacityAh = 60.0f;
                 newModel = 2;
             } else {

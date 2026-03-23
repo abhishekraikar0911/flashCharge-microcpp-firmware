@@ -7,82 +7,8 @@ SemaphoreHandle_t dataMutex = nullptr;
 SemaphoreHandle_t serialMutex = nullptr;
 
 // =========================================================
-// SHARED STATE VARIABLES
+// CAN DIAGNOSTIC BUFFERS (Raw CAN protocol data, not state)
 // =========================================================
-bool vehicleConfirmed = false;
-bool gunPhysicallyConnected = false;
-
-float energyWh = 0.0f;
-bool batteryConnected = false;
-bool chargingEnabled = false;
-bool chargingswitch = false;
-
-// BMS Safety flags
-bool bmsSafeToCharge = false;  // TRUE only when byte4=0x00
-bool bmsHeatingActive = false;  // TRUE when byte5=0x01
-
-float BMS_Vmax = 0.0f;
-float BMS_Imax = 0.0f;
-float Charger_Vmax = 0.0f;
-float Charger_Imax = 0.0f;
-float chargerVolt = 0.0f;
-float chargerCurr = 0.0f;
-float chargerTemp = 0.0f;
-float terminalchargerPower = 0.0f;
-float terminalVolt = 0.0f;
-float terminalCurr = 0.0f;
-float socPercent = 0.0f;
-float rangeKm = 0.0f;
-uint8_t vehicleModel = 0;  // 0=Unknown, 1=Classic, 2=Pro, 3=Max
-float batteryAh = 0.0f;
-float batterySoc = 0.0f;
-float totalChargingAh = 0.0f;    // Total charging Ah (lifetime)
-float totalDischargingAh = 0.0f; // Total discharging Ah (lifetime)
-
-uint16_t metric79_raw = 0;
-float metric79_scaled = 0.0f;
-uint32_t metric83_raw = 0;
-float metric83_scaled = 0.0f;
-
-unsigned long lastBMS = 0;
-uint8_t heating = 0;
-// CRITICAL: Initialize to 0 for proper timeout detection at boot
-// With millis() - 0, timeout will trigger immediately if no messages received
-unsigned long lastHeartbeat = 0;
-unsigned long lastChargerResponse = 0;
-unsigned long lastTerminalPower = 0;
-unsigned long lastTerminalStatus = 0;
-bool chargerModuleOnline = false;     // Charger offline at boot
-bool canRecoveryActive = false;       // CAN bus recovery in progress
-
-const char *chargerStatus = "UNKNOWN";
-const char *terminalchargerStatus = "UNKNOWN";
-const char *terminalStatus = "UNKNOWN";
-
-int userChoice = 0;
-unsigned long lastPrint = 0;
-uint8_t stopCmd = 0;
-
-bool sessionActive = false;
-bool ocppInitialized = false;
-
-// =========================================================
-// FAULT STABILIZATION GUARD (Production Safety)
-// =========================================================
-bool faultLockActive = false;        // TRUE when fault occurred, blocks new RemoteStart
-unsigned long faultLockTime = 0;     // Timestamp when fault lock was set
-
-// =========================================================
-// TRANSACTION GATE (FIX 1 - HARD GATE)
-// =========================================================
-bool transactionActive = false;      // TRUE only when valid transaction running
-int activeTransactionId = -1;        // Valid transaction ID (>0)
-bool remoteStartAccepted = false;    // TRUE only after RemoteStart accepted
-char persistedIdTag[32] = {0};      // Restored IdTag for library re-hydration
-unsigned long txStartTime = 0;       // Transaction start timestamp (millis)
-unsigned long txStopTime = 0;        // Transaction stop timestamp (millis)
-
-// Buffers
 uint8_t lastData[8] = {0};
 uint8_t lastBMSData[8] = {0};
 uint8_t lastStatusData[8] = {0};
@@ -96,11 +22,27 @@ uint8_t lastTempData[8] = {0};
 uint8_t lastTermData1[8] = {0};
 uint8_t lastTermData2[8] = {0};
 
+// =========================================================
+// CAN RAW PROTOCOL VALUES (Charger Module format)
+// =========================================================
 uint32_t cachedRawV = 0;
 uint32_t cachedRawI = 0;
 
+// =========================================================
+// CAN-LEVEL STATUS STRINGS (Not state — used for CAN diagnostics only)
+// =========================================================
+const char *chargerStatus = "UNKNOWN";
+const char *terminalchargerStatus = "UNKNOWN";
+const char *terminalStatus = "UNKNOWN";
+
 // CAN Update Flag
 volatile bool updateCAN = false;
+
+// CAN PROTOCOL METRICS (diagnostic only, not state)
+uint16_t metric79_raw = 0;
+float metric79_scaled = 0.0f;
+uint32_t metric83_raw = 0;
+float metric83_scaled = 0.0f;
 
 // Initialize mutexes in setup
 void initGlobals()

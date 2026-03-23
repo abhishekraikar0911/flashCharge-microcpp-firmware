@@ -16,7 +16,7 @@
 #include "../include/wifi_manager.h"
 #include "../include/modules/network_manager.h"
 #include "../include/health_monitor.h"
-#include "../include/ocpp_state_machine.h"
+// PHASE 4: Removed #include "../include/ocpp_state_machine.h" — library manages state internally
 #include "../include/security_manager.h"
 #include "../include/modules/ota_manager.h"
 #include "../include/drivers/can_twai_driver.h"
@@ -44,7 +44,7 @@ void ocppTask(void *pvParameters)
     // Main OCPP loop
     for (;;)
     {
-        if (!ocppInitialized)
+        if (!SystemState::instance().getOcppInitialized())
         {
             if (prod::g_networkManager.isConnected() && (int32_t)(millis() - nextAttemptMs) >= 0)
             {
@@ -61,13 +61,13 @@ void ocppTask(void *pvParameters)
                 }
             }
 
-            // g_healthMonitor.feed(); // DISABLED: Testing GSM step-by-step
+            g_healthMonitor.feed();
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
         ocpp::poll();
-        // g_healthMonitor.feed(); // DISABLED: Testing GSM step-by-step / User requested disable
+        g_healthMonitor.feed();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -90,19 +90,8 @@ void setup()
     // Removed legacy LED_WIFI
 
 
-    // TEMPORARY: Aggressively disable ALL watchdog timers for verification testing
-    // Step 1: Remove IDLE tasks from TWDT (they are added by default in ESP-IDF)
-    TaskHandle_t idle0 = xTaskGetIdleTaskHandleForCPU(0);
-    TaskHandle_t idle1 = xTaskGetIdleTaskHandleForCPU(1);
-    if (idle0) esp_task_wdt_delete(idle0);
-    if (idle1) esp_task_wdt_delete(idle1);
-    // Step 2: Deinit the TWDT entirely
-    esp_task_wdt_deinit();
-    Serial.println("[BOOT] ⚠️  ALL Watchdog Timers DISABLED (IDLE0, IDLE1, TWDT)");
-    
-    // Initialize health monitor (calls TWDT init internally, so keep commented for now)
-    // g_healthMonitor.init(); 
-    Serial.println("[System] 🛡️  Health Monitor / Watchdog DISABLED per user request");
+    // Initialize health monitor with 30s Task Watchdog Timer
+    g_healthMonitor.init();
 
     // SECURITY FIX: Load configuration from secure storage instead of hardcoded values
     char chargerId[32], csmsHost[128], csmsUrl[256];
@@ -158,8 +147,6 @@ void setup()
     lastBootTime = bootTime;
 
 
-    // Initialize health monitor FIRST
-    // g_healthMonitor.init(); // DISABLED: Testing GSM step-by-step
 
     // Initialize global variables and mutexes
     initGlobals();
@@ -287,7 +274,7 @@ void setup()
     }
     else
     {
-        // g_healthMonitor.addTaskToWatchdog(can1RxHandle, "CAN1_RX"); // DISABLED per user request
+        g_healthMonitor.addTaskToWatchdog(can1RxHandle, "CAN1_RX");
     }
 
     // Create CAN2 RX task (BMS) - HIGH PRIORITY (priority 8)
@@ -307,7 +294,7 @@ void setup()
     }
     else
     {
-        // g_healthMonitor.addTaskToWatchdog(can2RxHandle, "CAN2_RX"); // DISABLED per user request
+        g_healthMonitor.addTaskToWatchdog(can2RxHandle, "CAN2_RX");
     }
 
     // Create charger communication task - HIGH PRIORITY (priority 7)
@@ -328,7 +315,7 @@ void setup()
     else
     {
         // SAFETY: Add to watchdog
-        // g_healthMonitor.addTaskToWatchdog(chargerHandle, "CHARGER_COMM"); // DISABLED per user request
+        g_healthMonitor.addTaskToWatchdog(chargerHandle, "CHARGER_COMM");
     }
 
     // FIX #3: Create OCPP task on Core 0 - MEDIUM PRIORITY (priority 3)
@@ -347,7 +334,7 @@ void setup()
     }
     else
     {
-        // g_healthMonitor.addTaskToWatchdog(ocppTaskHandle, "OCPP_LOOP"); // DISABLED per user request
+        g_healthMonitor.addTaskToWatchdog(ocppTaskHandle, "OCPP_LOOP");
     }
 
     // Create UI task for serial menu - LOWEST PRIORITY
@@ -387,7 +374,7 @@ void setup()
             Serial.println("[NETWORK_MGR] Task started, beginning connection...");
             while (true) {
                 prod::g_networkManager.poll();
-                // g_healthMonitor.feed(); // DISABLED
+                g_healthMonitor.feed();
                 vTaskDelay(pdMS_TO_TICKS(1000));
             }
         },
@@ -401,7 +388,7 @@ void setup()
     if (netResult != pdPASS) {
         Serial.println("[CRITICAL] Failed to create NETWORK_MGR task!");
     } else {
-        // g_healthMonitor.addTaskToWatchdog(networkTaskHandle, "NETWORK_MGR"); // DISABLED per user request
+        g_healthMonitor.addTaskToWatchdog(networkTaskHandle, "NETWORK_MGR");
     }
 
     // Initialize security (TLS/WSS)
@@ -427,8 +414,7 @@ void setup()
     // Initialize hardware monitoring service (extracted from loop())
     g_hardwareService.begin();
 
-    // Initialize OCPP state machine
-    g_ocppStateMachine.init();
+    // PHASE 4: Removed g_ocppStateMachine.init() — library manages connector state internally
 
     Serial.println("[BOOT] ✅ All systems initialized!\n");
     
@@ -440,17 +426,16 @@ void setup()
 void loop()
 {
     // CRITICAL: Feed watchdog for loop task (runs on Core 1)
-    // g_healthMonitor.feed(); // DISABLED
-    // g_healthMonitor.poll(); // DISABLED
+    g_healthMonitor.feed();
+    g_healthMonitor.poll();
 
     // CRITICAL: Wait for OCPP initialization before accessing connector 1
-    if (!ocppInitialized) {
+    if (!SystemState::instance().getOcppInitialized()) {
         vTaskDelay(pdMS_TO_TICKS(100));
         return;
     }
     
-    // Core services (lightweight polling)
-    g_ocppStateMachine.poll();
+    // PHASE 4: Removed g_ocppStateMachine.poll() — library manages connector state internally
 
     // ═══════════════════════════════════════════════════════════
     // All hardware monitoring delegated to HardwareService

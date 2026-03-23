@@ -13,6 +13,9 @@
 
 // Toggle OCPP telemetry here (set to 1 to enable, 0 to disable)
 #define ENABLE_OCPP_TELEMETRY 0
+
+// CAN bus recovery tracking (file-scoped)
+static bool canRecoveryActive = false;
 #if ENABLE_OCPP_TELEMETRY
 #include "ocpp/csms_communication.h"
 #endif
@@ -101,6 +104,7 @@ static void decode_0681817E(const twai_message_t &msg)
     }
 
     // FIX: Use timeout to prevent deadlock
+    auto& state = SystemState::instance();
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         if (func == 0x32)
@@ -114,36 +118,39 @@ static void decode_0681817E(const twai_message_t &msg)
         else if (func == 0x00)
         {
             memcpy(lastVmaxData, msg.data, dlc > 8 ? 8 : dlc);
-            Charger_Vmax = raw / 1024.0f;
+            float vmax = raw / 1024.0f;
             // CRITICAL FIX: Validate voltage reading
-            if (!CANValidator::validateVoltage(Charger_Vmax))
+            if (!CANValidator::validateVoltage(vmax))
             {
-                Serial.printf("[CAN] ⚠️  Invalid Vmax: %.1fV, ignoring\n", Charger_Vmax);
-                Charger_Vmax = 0.0f;
+                Serial.printf("[CAN] ⚠️  Invalid Vmax: %.1fV, ignoring\n", vmax);
+                vmax = 0.0f;
             }
+            state.setCharger_Vmax(vmax);
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
-                Serial.printf("[CHARGER]   ← Vmax=%.1fV\n", Charger_Vmax);
+                Serial.printf("[CHARGER]   ← Vmax=%.1fV\n", vmax);
             }
         }
         else if (func == 0x03)
         {
             memcpy(lastImaxData, msg.data, dlc > 8 ? 8 : dlc);
-            Charger_Imax = raw / 30.5f;
+            float imax = raw / 30.5f;
             // CRITICAL FIX: Validate current reading
-            if (!CANValidator::validateCurrent(Charger_Imax))
+            if (!CANValidator::validateCurrent(imax))
             {
-                Serial.printf("[CAN] ⚠️  Invalid Imax: %.1fA, ignoring\n", Charger_Imax);
-                Charger_Imax = 0.0f;
+                Serial.printf("[CAN] ⚠️  Invalid Imax: %.1fA, ignoring\n", imax);
+                imax = 0.0f;
             }
+            state.setCharger_Imax(imax);
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
-                Serial.printf("[CHARGER]   ← Imax=%.1fA\n", Charger_Imax);
+                Serial.printf("[CHARGER]   ← Imax=%.1fA\n", imax);
             }
         }
-        if (Charger_Vmax >= 40.0f && Charger_Vmax <= 90.0f)
+        float cvmax = state.getCharger_Vmax();
+        if (cvmax >= 40.0f && cvmax <= 90.0f)
         {
-            batteryConnected = true;
-            SystemState::instance().setBatteryConnected(true);
-            lastBMS = millis();
+            // Removed: Initial Wake-Up Trigger based on charger voltage.
+            // This is now purely handled by the BMS driver to avoid 20-second 
+            // delay on unplug due to residual capacitor voltage.
         }
         xSemaphoreGive(dataMutex);
     }
@@ -173,51 +180,51 @@ static void decode_0681827E(const twai_message_t &msg)
     }
 
     // FIX: Use timeout to prevent deadlock
+    auto& state = SystemState::instance();
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         if (func == 0x84)
         {
             memcpy(lastBattData, msg.data, dlc > 8 ? 8 : dlc);
-            chargerVolt = parseBEUint32(&msg.data[4]) / 1024.0f;
+            float cv = parseBEUint32(&msg.data[4]) / 1024.0f;
             // CRITICAL FIX: Validate voltage
-            if (!CANValidator::validateVoltage(chargerVolt))
+            if (!CANValidator::validateVoltage(cv))
             {
-                Serial.printf("[CAN] ⚠️  Invalid voltage: %.1fV\n", chargerVolt);
-                chargerVolt = 0.0f;
+                Serial.printf("[CAN] ⚠️  Invalid voltage: %.1fV\n", cv);
+                cv = 0.0f;
             }
-            terminalVolt = chargerVolt; // Sync for now
-            SystemState::instance().setTerminalVolt(terminalVolt);
+            state.setChargerVolt(cv);
+            state.setTerminalVolt(cv); // Sync for now
 
-            if (chargerVolt >= 40.0f && chargerVolt <= 90.0f)
+            if (cv >= 40.0f && cv <= 90.0f)
             {
-                batteryConnected = true;
-                SystemState::instance().setBatteryConnected(true);
+                state.setBatteryConnected(true);
             }
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
-                Serial.printf("[CHARGER]   ← Voltage: %.1fV\n", chargerVolt);
+                Serial.printf("[CHARGER]   ← Voltage: %.1fV\n", cv);
             }
         }
         else if (func == 0x82)
         {
             memcpy(lastCurrData, msg.data, dlc > 8 ? 8 : dlc);
-            chargerCurr = parseBEUint16(&msg.data[6]) / 1024.0f;
+            float cc = parseBEUint16(&msg.data[6]) / 1024.0f;
             // CRITICAL FIX: Validate current
-            if (!CANValidator::validateCurrent(chargerCurr))
+            if (!CANValidator::validateCurrent(cc))
             {
-                Serial.printf("[CAN] ⚠️  Invalid current: %.1fA\n", chargerCurr);
-                chargerCurr = 0.0f;
+                Serial.printf("[CAN] ⚠️  Invalid current: %.1fA\n", cc);
+                cc = 0.0f;
             }
-            terminalCurr = chargerCurr; // Sync for now
-            SystemState::instance().setTerminalCurr(terminalCurr);
+            state.setChargerCurr(cc);
+            state.setTerminalCurr(cc); // Sync for now
             if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
-                Serial.printf("[CHARGER]   ← Current: %.1fA\n", chargerCurr);
+                Serial.printf("[CHARGER]   ← Current: %.1fA\n", cc);
             }
         }
         else if (func == 0x80)
         {
             memcpy(lastTempData, msg.data, dlc > 8 ? 8 : dlc);
-            chargerTemp = parseBEUint16(&msg.data[6]) * 0.001f;
-            SystemState::instance().setChargerTemp(chargerTemp);
+            float ct = parseBEUint16(&msg.data[6]) * 0.001f;
+            state.setChargerTemp(ct);
         }
         else if (func == 0x79)
         {
@@ -255,40 +262,44 @@ static void decode_00433F01(const twai_message_t &msg)
     }
 
     // FIX: Use timeout to prevent deadlock
+    auto& state = SystemState::instance();
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
         memcpy(lastTermData1, msg.data, dlc > 8 ? 8 : dlc);
         
-        terminalVolt = parseBEFloat(&msg.data[0]);
-        terminalCurr = parseBEFloat(&msg.data[4]);
+        float tv = parseBEFloat(&msg.data[0]);
+        float tc = parseBEFloat(&msg.data[4]);
         
         // CRITICAL FIX: Validate readings
-        if (!CANValidator::validateVoltage(terminalVolt))
+        if (!CANValidator::validateVoltage(tv))
         {
-            Serial.printf("[CAN] ⚠️  Invalid terminal voltage: %.1fV\n", terminalVolt);
-            terminalVolt = 0.0f;
+            Serial.printf("[CAN] ⚠️  Invalid terminal voltage: %.1fV\n", tv);
+            tv = 0.0f;
         }
-        if (!CANValidator::validateCurrent(terminalCurr))
+        if (!CANValidator::validateCurrent(tc))
         {
-            Serial.printf("[CAN] ⚠️  Invalid terminal current: %.1fA\n", terminalCurr);
-            terminalCurr = 0.0f;
+            Serial.printf("[CAN] ⚠️  Invalid terminal current: %.1fA\n", tc);
+            tc = 0.0f;
         }
-        
-        terminalchargerPower = terminalVolt * terminalCurr;
+
+        state.setTerminalVolt(tv);
+        state.setTerminalCurr(tc);
+        state.setTerminalPower(tv * tc);
         
         if (DebugLogger::getActiveSection() == 2 || DebugLogger::getActiveSection() == 0) {
             Serial.printf("[CHARGER]   ← Terminal: V=%.1fV I=%.1fA P=%.1fW\n",
-                         terminalVolt, terminalCurr, terminalchargerPower);
+                         tv, tc, tv * tc);
         }
 
         // CRITICAL: Update timestamp for charger health monitoring
-        lastTerminalPower = millis();
+        state.setLastTerminalPower(millis());
 
         // HYBRID PLUG DETECTION - Method 1: Voltage + Current presence
-        if (terminalVolt >= 40.0f && terminalVolt <= 90.0f)
+        if (tv >= 40.0f && tv <= 90.0f)
         {
-            batteryConnected = true;
-            lastBMS = millis();
+            // Removed: Initial Wake-Up Trigger based on charger voltage.
+            // This is now purely handled by the BMS driver to avoid 20-second 
+            // delay on unplug due to residual capacitor voltage.
         }
 
         xSemaphoreGive(dataMutex);
@@ -318,7 +329,7 @@ static void decode_00473F01(const twai_message_t &msg)
             terminalStatus = "UNKNOWN";
 
         // CRITICAL: Update timestamp for charger health monitoring
-        lastTerminalStatus = millis();
+        SystemState::instance().setLastTerminalStatus(millis());
 
         xSemaphoreGive(dataMutex);
     }
@@ -343,7 +354,7 @@ static void decode_18FF50E5(const twai_message_t &msg)
         }
 
         // CRITICAL: Update timestamp for charger health monitoring
-        lastHeartbeat = millis();
+        SystemState::instance().setLastHeartbeat(millis());
         
         xSemaphoreGive(dataMutex);
     }
@@ -372,12 +383,7 @@ void sendGroupRequest(Group &g)
 
     if (func == 0x32)
     {
-        bool enabled = false;
-        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-        {
-            enabled = chargingEnabled;
-            xSemaphoreGive(dataMutex);
-        }
+        bool enabled = SystemState::instance().getChargingEnabled();
         tx.data[2] = 0x00;
         tx.data[3] = enabled ? 0x00 : 0x01;
     }
@@ -496,10 +502,7 @@ void chargerCommTask(void *arg)
                     lastBusRecovery = millis();
                     
                     CANStatusLogger::printRecoveryStep(3, 4, "Disabling charging for safety");
-                    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                        chargingEnabled = false;
-                        xSemaphoreGive(dataMutex);
-                    }
+                    SystemState::instance().setChargingEnabled(false);
                     
                     CANStatusLogger::printRecoveryStep(4, 4, "Marking for re-initialization");
                     startupInitComplete = false;
@@ -628,7 +631,7 @@ void chargerCommTask(void *arg)
             processed++;
         }
 
-        // prod::g_healthMonitor.feed(); // DISABLED for testing
+        prod::g_healthMonitor.feed();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -651,17 +654,7 @@ void chargerCommTask(void *arg)
 void sendImmediateChargerStop()
 {
     // Check if charging is actually enabled (avoid unnecessary CAN traffic)
-    bool currentlyEnabled = false;
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-    {
-        currentlyEnabled = chargingEnabled;
-        xSemaphoreGive(dataMutex);
-    }
-    else
-    {
-        Serial.println("[SAFETY] ⚠️  Mutex timeout in sendImmediateChargerStop");
-        // Continue anyway - safety critical, better to send duplicate than miss
-    }
+    bool currentlyEnabled = SystemState::instance().getChargingEnabled();
     
     if (!currentlyEnabled)
     {
@@ -706,6 +699,7 @@ void sendImmediateChargerStop()
 bool isChargerModuleHealthy()
 {
     const unsigned long now = millis();
+    auto& state = SystemState::instance();
 
     // ═══════════════════════════════════════════════════════════════
     // STARTUP STABILIZATION (CRITICAL)
@@ -720,27 +714,24 @@ bool isChargerModuleHealthy()
         return true;
     }
 
-    const unsigned long CHARGER_TIMEOUT_MS = 10000; // FIX2: Increased from 5s to 10s
-                                                     // Prevents false Faulted on brief CAN spikes
+    const unsigned long CHARGER_TIMEOUT_MS = 10000;
     
-    // Check if we're receiving critical CAN messages from charger
-    bool terminalPowerOk = (now - lastTerminalPower) < CHARGER_TIMEOUT_MS;
-    bool terminalStatusOk = (now - lastTerminalStatus) < CHARGER_TIMEOUT_MS;
-    bool heartbeatOk = (now - lastHeartbeat) < CHARGER_TIMEOUT_MS;
+    // Check if we're receiving critical CAN messages from charger (via SystemState timestamps)
+    bool terminalPowerOk = (now - state.getLastTerminalPower()) < CHARGER_TIMEOUT_MS;
+    bool terminalStatusOk = (now - state.getLastTerminalStatus()) < CHARGER_TIMEOUT_MS;
+    bool heartbeatOk = (now - state.getLastHeartbeat()) < CHARGER_TIMEOUT_MS;
     
     // Charger is healthy if at least 2 out of 3 messages are recent
     int healthyCount = (terminalPowerOk ? 1 : 0) + (terminalStatusOk ? 1 : 0) + (heartbeatOk ? 1 : 0);
     bool currentReadingHealthy = (healthyCount >= 2);
 
-    // FIX2: Fault Debouncing increased from 3s to 10s
-    // Previously, charger had to miss only ~8s of CAN messages to trigger Faulted.
-    // Now requires 10s of no healthy readings before transitioning to FAULTED.
+    // FIX2: Fault Debouncing — 10s of no healthy readings before FAULTED
     static unsigned long lastHealthyTime = now;
     if (currentReadingHealthy) {
         lastHealthyTime = now;
     }
 
-    bool healthy = (now - lastHealthyTime < 10000); // FIX2: was 3000
+    bool healthy = (now - lastHealthyTime < 10000);
     
     // Log health status changes
     static bool lastHealthStatus = true;
@@ -751,9 +742,8 @@ bool isChargerModuleHealthy()
         lastHealthStatus = healthy;
     }
     
-    // Update global status
-    chargerModuleOnline = healthy;
-    SystemState::instance().setChargerModuleOnline(healthy);
+    // Update SystemState
+    state.setChargerModuleOnline(healthy);
     
     return healthy;
 }
