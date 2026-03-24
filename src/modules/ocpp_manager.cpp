@@ -5,27 +5,27 @@
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
-#include "../../include/config/hardware.h"
-#include "../../include/utils/safe_serial.h"
+#include "config/hardware.h"
+#include "utils/safe_serial.h"
 
-#include "../../include/ocpp/ocpp_client.h"
-#include "../../include/production_config.h"
-#include "../../include/secrets.h"
-#include "../../include/config/secure_config.h"
-#include "../../include/header.h"
-#include "../../include/modules/ota_manager.h"
-// PHASE 4: Removed #include "../../include/ocpp_state_machine.h" — library manages state internally
-#include "../../include/config/certificates.h"
-#include "../../include/modules/network_manager.h"
-#include "../../include/modules/ocpp_connection_helper.h"
+#include "ocpp/ocpp_client.h"
+#include "config/production_config.h"
+#include "config/secrets.h"
+#include "config/secure_config.h"
+#include "header.h"
+#include "modules/ota_manager.h"
+// PHASE 4: Removed #include "ocpp_state_machine.h" — library manages state internally
+#include "config/certificates.h"
+#include "modules/network_manager.h"
+#include "modules/ocpp_connection_helper.h"
 #include <MicroOcpp/Core/Context.h>
 #include <MicroOcpp/Model/Model.h>
 #include <MicroOcpp/Model/Boot/BootService.h>
 #include <MicroOcpp/Model/FirmwareManagement/FirmwareService.h>
 #include <freertos/semphr.h>
-#include "../../include/modules/ocpp_transaction_manager.h"
-#include "../../include/modules/ocpp_meter_service.h"
-#include "../../include/modules/system_state.h"
+#include "modules/ocpp_transaction_manager.h"
+#include "modules/ocpp_meter_service.h"
+#include "modules/system_state.h"
 
 // All state now accessed through SystemState::instance()
 

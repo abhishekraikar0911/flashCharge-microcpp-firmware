@@ -1,7 +1,7 @@
-#include "../../include/drivers/can_twai_driver.h"
-#include "../../include/header.h"
-#include "../../include/config/hardware.h"
-#include "../../include/health_monitor.h"
+#include "drivers/can_twai_driver.h"
+#include "header.h"
+#include "config/hardware.h"
+#include "modules/health_monitor.h"
 
 // FreeRTOS Queue for received messages (replaces manual ring buffer)
 static QueueHandle_t rxQueue = nullptr;

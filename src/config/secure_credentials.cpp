@@ -1,4 +1,4 @@
-#include "../../include/utils/secure_credentials.h"
+#include "config/secure_credentials.h"
 
 namespace SecureCredentials
 {

@@ -1,6 +1,6 @@
-#include "../../include/drivers/can_driver.h"
-#include "../../include/header.h"
-#include "../../include/config/hardware.h"
+#include "drivers/can_driver.h"
+#include "header.h"
+#include "config/hardware.h"
 
 // New CAN driver buffer item (different from legacy RxBufItem)
 struct CanRxItem

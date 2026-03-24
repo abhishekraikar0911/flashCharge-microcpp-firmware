@@ -1,8 +1,8 @@
-#include "../include/wifi_manager.h"
-#include "../include/config/secure_config.h"
-#include "../include/utils/safe_string.h"
+#include "modules/wifi_manager.h"
+#include "config/secure_config.h"
+#include "utils/safe_string.h"
 #include <Arduino.h>
-#include "../include/health_monitor.h"
+#include "modules/health_monitor.h"
 
 namespace prod
 {

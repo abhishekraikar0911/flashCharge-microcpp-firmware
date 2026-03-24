@@ -1,6 +1,6 @@
-#include "../include/health_monitor.h"
-#include "../include/modules/network_manager.h"
-#include "../include/header.h"
+#include "modules/health_monitor.h"
+#include "modules/network_manager.h"
+#include "header.h"
 #include <Arduino.h>
 
 namespace prod

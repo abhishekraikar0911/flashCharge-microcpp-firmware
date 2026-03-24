@@ -8,10 +8,10 @@
  * @date 2026
  */
 
-#include "../../include/modules/ocpp_connection_helper.h"
-#include "../../include/secrets.h"
-#include "../../include/config/certs.h"
-#include "../../include/utils/safe_serial.h"
+#include "modules/ocpp_connection_helper.h"
+#include "config/secrets.h"
+#include "config/certs.h"
+#include "utils/safe_serial.h"
 #include <Arduino.h>
 
 namespace prod {

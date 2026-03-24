@@ -1,6 +1,7 @@
-# ESP32 OCPP EV Charger Controller
+# flashCharge EV Charger Firmware
+**Rivot Motors | OCPP 1.6 | ESP32 | v2.5.0**
 
-Production-ready ESP32 firmware for OCPP 1.6 compliant electric vehicle charging station with CAN bus integration.
+Production-ready ESP32 firmware for an OCPP 1.6 compliant electric vehicle charging station with CAN bus integration, FreeRTOS multi-core architecture, and TLS-encrypted cloud communication.
 
 ## 🚀 Features
 
@@ -99,19 +100,10 @@ microocpp/
 
 ## ⚙️ Configuration
 
-### 1. WiFi & Server Settings
+All credential setup is handled via the **provisioning menu** at first boot. Connect via serial monitor and press **`p`** when prompted to enter WiFi and OCPP server credentials. They are stored securely in encrypted NVS flash — no file editing required.
 
-Copy `include/secrets.h.example` to `include/secrets.h` and edit:
-
-```cpp
-#define SECRET_WIFI_SSID "YourWiFiSSID"
-#define SECRET_WIFI_PASS "YourWiFiPassword"
-#define SECRET_CHARGER_ID "YOUR_CHARGER_ID"
-#define SECRET_CHARGER_MODEL "Your Charger Model"
-#define SECRET_CHARGER_VENDOR "Your Company Name"
-```
-
-The OCPP server URL is automatically constructed from the charger ID.
+> [!IMPORTANT]
+> Never edit `include/config/secrets.h` directly. That file is a stub only. Always use the provisioning menu or `SecureConfig` API.
 
 ### 2. Hardware Configuration
 
@@ -245,22 +237,22 @@ See [Documentation Index](docs/README.md) for complete list.
 ```
 **Root Cause**: Charger module expects both CAN IDs (0x068181FE and 0x068182FE) at startup. Previous firmware only sent Group 2 when gun was connected.
 
-**Solution**: Firmware v2.5.1 fixes this by:
+**Solution**: Firmware v2.5.0 fixes this by:
 1. Sending both groups at startup (initialization sequence)
 2. Always sending both groups continuously (not conditional)
 3. Re-initializing after CAN recovery
 
-**See**: [CHARGER_FAULT_FIX.md](CHARGER_FAULT_FIX.md) for detailed explanation
+**See**: [CHARGER_FAULT_FIX.md](docs/archive/CHARGER_FAULT_FIX.md) for detailed explanation
 
 ### CAN Bus Stability Issues
 
 ```
 [CAN] 🚨 BUS-OFF detected, initiating recovery...
 ```
-**Solution**: See comprehensive fix guides:
-- **[CAN Bus Fixes Summary](CAN_BUS_FIXES_SUMMARY.md)** - Quick reference for all fixes
-- **[Firmware Fixes](FIRMWARE_FIXES_IMPLEMENTED.md)** - Detailed firmware changes (v2.5.0)
-- **[Hardware Fixes Guide](HARDWARE_FIXES_GUIDE.md)** - Step-by-step hardware improvements
+**Solution**: See comprehensive fix guides in the `docs/archive/` folder:
+- **[CAN Bus Fixes Summary](docs/archive/CAN_BUS_FIXES_SUMMARY.md)** - Quick reference for all fixes
+- **[Firmware Fixes](docs/archive/FIRMWARE_FIXES_IMPLEMENTED.md)** - Detailed firmware changes (v2.5.0)
+- **[Hardware Fixes Guide](docs/archive/HARDWARE_FIXES_GUIDE.md)** - Step-by-step hardware improvements
 
 **Quick Fixes**:
 1. Add 120Ω termination resistors at both ends of CAN bus
@@ -273,7 +265,7 @@ See [Documentation Index](docs/README.md) for complete list.
 ```
 [WiFi] ❌ Initial connection failed
 ```
-**Solution**: Check SSID/password in `secrets.h`, verify 2.4GHz network
+**Solution**: Check SSID/password in the provisioning menu, verify 2.4GHz network.
 
 ### OCPP Connection Issues
 
@@ -281,7 +273,7 @@ See [Documentation Index](docs/README.md) for complete list.
 [MO] info (Connection.cpp:74): Disconnected
 ```
 **Solution**: 
-- Verify server URL in `secrets.h`
+- Verify server URL via provisioning menu
 - Check firewall allows port 8080
 - Ensure charger ID is registered in OCPP server
 
@@ -353,8 +345,8 @@ SecureCredentials::g_secureCredentials.storeOCPPCredentials("host", 443, "charge
 6. ✅ Disable debug logging in production builds
 
 **Security Documentation:**
-- [SECURITY_FIXES_v2.6.0.md](SECURITY_FIXES_v2.6.0.md) - Complete security guide
-- [SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md) - Developer quick reference
+- [Security Guide](docs/archive/SECURITY_FIXES_v2.6.0.md) - Complete security guide
+- [Security Quick Reference](docs/archive/SECURITY_QUICK_REFERENCE.md) - Developer quick reference
 
 ## 📈 Performance
 
@@ -383,15 +375,15 @@ Priority 2: UI Console
 
 ## 📝 Version History
 
-- **v2.6.0** (January 2025) - CRITICAL: Security & Memory Safety Fixes
-  - ✅ Fixed all buffer overflow vulnerabilities with SafeString utilities
-  - ✅ Added comprehensive CAN message validation (CANValidator)
-  - ✅ Implemented secure credential storage (encrypted NVS)
-  - ✅ Fixed race conditions with timeout-based mutex acquisition
-  - ✅ Added input validation for all CAN data (voltage, current, SOC)
-  - ✅ Eliminated hardcoded credentials security risk
-  - See [SECURITY_FIXES_v2.6.0.md](SECURITY_FIXES_v2.6.0.md) for complete details
-  - See [SECURITY_QUICK_REFERENCE.md](SECURITY_QUICK_REFERENCE.md) for developer guide
+- **v2.5.0** (March 2026) - Safety, Security & Architecture Overhaul
+  - ✅ Graduated temperature response (60°C warning, 70°C emergency stop)
+  - ✅ OTA anti-rollback protection
+  - ✅ FreeRTOS task for hardware polling (`HW_SVC`)
+  - ✅ Removed legacy CAN copy-buffers, eliminating deadlock risk
+  - ✅ Enhanced BMS fault parsing (per-bit reporting)
+  - ✅ WiFi exponential backoff retry
+  - ✅ Git history sanitized (BFG Repo Cleaner)
+  - ✅ GitHub Actions CI with native unit tests
 - **v2.5.1** (January 2025) - CRITICAL: Charger fault fix
   - Fixed charger entering fault state at startup
   - Send both CAN groups (0x068181FE and 0x068182FE) at initialization
@@ -419,4 +411,4 @@ For issues or questions:
 
 ---
 
-**Status**: ✅ Production Ready | **Last Updated**: January 2025
+**Status**: ✅ Production Ready | **Version**: v2.5.0 | **Last Updated**: March 2026 | **Copyright** © 2026 Rivot Motors

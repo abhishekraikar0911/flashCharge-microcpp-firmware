@@ -1,8 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include "debug_monitor.h"
-#include "diagnostics.h"
+#include "modules/debug_monitor.h"
+#include "utils/diagnostics.h"
 
 namespace DebugCommands {
 

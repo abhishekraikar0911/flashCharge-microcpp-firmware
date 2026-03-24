@@ -1,9 +1,9 @@
-#include "../../include/modules/ota_manager.h"
-#include "../../include/production_config.h"
-#include "../../include/security_manager.h"
-#include "../../include/ocpp/ocpp_client.h"
-#include "../../include/header.h"
-#include "../../include/config/version.h"
+#include "modules/ota_manager.h"
+#include "config/production_config.h"
+#include "modules/security_manager.h"
+#include "ocpp/ocpp_client.h"
+#include "header.h"
+#include "config/version.h"
 #include <Update.h>
 #include <MicroOcpp/Core/Context.h>
 #include <MicroOcpp/Model/Model.h>

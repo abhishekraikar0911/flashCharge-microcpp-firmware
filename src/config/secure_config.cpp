@@ -1,5 +1,5 @@
-#include "../../include/config/secure_config.h"
-#include "../../include/utils/safe_string.h"
+#include "config/secure_config.h"
+#include "utils/safe_string.h"
 #include <Arduino.h>
 
 namespace SecureConfig

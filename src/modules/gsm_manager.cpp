@@ -10,10 +10,10 @@
  * @date 2026
  */
 
-#include "../../include/modules/gsm_manager.h"
-#include "../../include/config/hardware.h"
-#include "../../include/config/secure_config.h"
-#include "../../include/health_monitor.h"
+#include "modules/gsm_manager.h"
+#include "config/hardware.h"
+#include "config/secure_config.h"
+#include "modules/health_monitor.h"
 #include <Arduino.h>
 
 namespace prod {

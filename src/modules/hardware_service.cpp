@@ -3,15 +3,15 @@
  * @brief Implementation of HardwareService — extracted from main.cpp loop().
  */
 
-#include "../include/modules/hardware_service.h"
-#include "../include/header.h"
-#include "../include/config/hardware.h"
-#include "../include/ocpp/ocpp_client.h"
-// PHASE 4: Removed #include "../include/ocpp_state_machine.h" — library manages state internally
-#include "../include/wifi_manager.h"
-#include "../include/modules/network_manager.h"
-#include "../include/health_monitor.h"
-#include "../include/modules/system_state.h"
+#include "modules/hardware_service.h"
+#include "header.h"
+#include "config/hardware.h"
+#include "ocpp/ocpp_client.h"
+// PHASE 4: Removed #include "ocpp_state_machine.h" — library manages state internally
+#include "modules/wifi_manager.h"
+#include "modules/network_manager.h"
+#include "modules/health_monitor.h"
+#include "modules/system_state.h"
 #include <MicroOcpp.h>
 
 

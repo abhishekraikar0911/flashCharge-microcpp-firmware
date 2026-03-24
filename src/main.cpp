@@ -8,23 +8,23 @@
 #include <MicroOcpp/Model/Transactions/Transaction.h>
 #include <MicroOcpp/Model/ConnectorBase/Connector.h>
 // SECURITY FIX: Removed hardcoded secrets.h, using secure configuration
-#include "../include/config/secure_config.h"
-#include "../include/header.h"
-#include "../include/debug_logger.h"
-#include "../include/ocpp/ocpp_client.h"
-#include "../include/production_config.h"
-#include "../include/wifi_manager.h"
-#include "../include/modules/network_manager.h"
-#include "../include/health_monitor.h"
-// PHASE 4: Removed #include "../include/ocpp_state_machine.h" — library manages state internally
-#include "../include/security_manager.h"
-#include "../include/modules/ota_manager.h"
-#include "../include/drivers/can_twai_driver.h"
-#include "../include/drivers/can_mcp2515_driver.h"
-#include "../include/config/version.h"
-#include "../include/config/hardware.h"
-#include "../include/modules/hardware_service.h"
-#include "../include/utils/safe_serial.h"
+#include "config/secure_config.h"
+#include "header.h"
+#include "utils/debug_logger.h"
+#include "ocpp/ocpp_client.h"
+#include "config/production_config.h"
+#include "modules/wifi_manager.h"
+#include "modules/network_manager.h"
+#include "modules/health_monitor.h"
+// PHASE 4: Removed ocpp_state_machine.h — library manages state internally
+#include "modules/security_manager.h"
+#include "modules/ota_manager.h"
+#include "drivers/can_twai_driver.h"
+#include "drivers/can_mcp2515_driver.h"
+#include "config/version.h"
+#include "config/hardware.h"
+#include "modules/hardware_service.h"
+#include "utils/safe_serial.h"
 
 extern void processDebugCommand(char c);
 

@@ -1,10 +1,10 @@
-#include "../../include/modules/ocpp_transaction_manager.h"
-#include "../../include/ocpp/ocpp_client.h"
-#include "../../include/modules/system_state.h"
-#include "../../include/config/hardware.h"
-#include "../../include/header.h"
-#include "../../include/production_config.h"
-#include "../../include/health_monitor.h"
+#include "modules/ocpp_transaction_manager.h"
+#include "ocpp/ocpp_client.h"
+#include "modules/system_state.h"
+#include "config/hardware.h"
+#include "header.h"
+#include "config/production_config.h"
+#include "modules/health_monitor.h"
 #include <MicroOcpp.h>
 
 namespace prod {

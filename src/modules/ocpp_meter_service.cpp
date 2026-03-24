@@ -1,6 +1,6 @@
-#include "../../include/modules/ocpp_meter_service.h"
-#include "../../include/ocpp/ocpp_client.h"
-#include "../../include/modules/system_state.h"
+#include "modules/ocpp_meter_service.h"
+#include "ocpp/ocpp_client.h"
+#include "modules/system_state.h"
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <functional>

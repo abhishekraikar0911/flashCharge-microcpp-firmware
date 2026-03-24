@@ -1,4 +1,4 @@
-#include "../../include/debug_monitor.h"
+#include "modules/debug_monitor.h"
 
 LogLevel DebugMonitor::currentLevel = LOG_INFO;
 bool DebugMonitor::enableColors = true;

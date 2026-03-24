@@ -1,10 +1,10 @@
-#include "../../include/drivers/can_mcp2515_driver.h"
-#include "../../include/header.h"
-#include "../../include/config/hardware.h"
-#include "../../include/health_monitor.h"
-#include "../../include/debug_logger.h"
-#include "../../include/utils/can_status_logger.h"
-#include "../../include/modules/system_state.h"
+#include "drivers/can_mcp2515_driver.h"
+#include "header.h"
+#include "config/hardware.h"
+#include "modules/health_monitor.h"
+#include "utils/debug_logger.h"
+#include "utils/can_status_logger.h"
+#include "modules/system_state.h"
 #include <SPI.h>
 
 // MCP2515 instance

@@ -1,6 +1,6 @@
-#include "../include/security_manager.h"
-#include "../include/config/security.h"
-#include "../include/config/certs.h"
+#include "modules/security_manager.h"
+#include "config/security.h"
+#include "config/certs.h"
 #include <Arduino.h>
 #include <string.h>
 #include <mbedtls/ecdsa.h>

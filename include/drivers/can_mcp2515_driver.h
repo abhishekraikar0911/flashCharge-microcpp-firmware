@@ -10,7 +10,7 @@
 #include <Arduino.h>
 #include <mcp2515.h>
 #include <stdint.h>
-#include "../../include/header.h"
+#include "header.h"
 
 #ifndef CAN_MESSAGE_STRUCT
 #define CAN_MESSAGE_STRUCT

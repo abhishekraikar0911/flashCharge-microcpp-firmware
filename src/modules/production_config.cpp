@@ -1,5 +1,5 @@
-#include "../include/production_config.h"
-#include "../include/utils/safe_string.h"
+#include "config/production_config.h"
+#include "utils/safe_string.h"
 #include <Arduino.h>
 
 namespace prod

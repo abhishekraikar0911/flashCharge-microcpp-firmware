@@ -1,4 +1,4 @@
-#include "../../include/utils/log_formatter.h"
+#include "utils/log_formatter.h"
 #include <stdarg.h>
 
 namespace LogFormatter {

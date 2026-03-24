@@ -11,13 +11,13 @@
  * @date 2026
  */
 
-#include "../../include/modules/network_manager.h"
-#include "../../include/modules/gsm_manager.h"
-#include "../../include/wifi_manager.h"
-#include "../../include/config/hardware.h"
-#include "../../include/health_monitor.h"
-#include "../../include/modules/system_state.h"
-#include "../../include/header.h"  // For extern bool ocppInitialized
+#include "modules/network_manager.h"
+#include "modules/gsm_manager.h"
+#include "modules/wifi_manager.h"
+#include "config/hardware.h"
+#include "modules/health_monitor.h"
+#include "modules/system_state.h"
+#include "header.h"  // For extern bool ocppInitialized
 #include <Arduino.h>
 #include <WiFi.h>
 #include <time.h>

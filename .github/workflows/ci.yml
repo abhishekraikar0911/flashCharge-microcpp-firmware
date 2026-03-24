@@ -29,3 +29,12 @@ jobs:
 
     - name: Verify ESP32 Production Build
       run: pio run -e charger_esp32_production
+
+    - name: Upload Firmware Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: flashcharge-firmware-${{ github.sha }}
+        path: |
+          .pio/build/charger_esp32_production/firmware.bin
+          .pio/build/charger_esp32_production/firmware.elf
+        retention-days: 30

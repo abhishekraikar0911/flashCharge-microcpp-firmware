@@ -13,7 +13,7 @@
  * 3. Remove secrets.h from version control after migration
  */
 
-#include "utils/secure_credentials.h"
+#include "config/secure_credentials.h"
 
 namespace SecureConfig
 {

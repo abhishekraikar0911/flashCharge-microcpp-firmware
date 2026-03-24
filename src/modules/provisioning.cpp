@@ -1,6 +1,6 @@
 // Provisioning Tool Implementation
 #include "modules/provisioning.h"
-#include "modules/secure_credentials.h"
+#include "config/secure_credentials.h"
 #include "modules/wss_config.h"
 
 void Provisioning::enterProvisioningMode() {
@@ -12,7 +12,7 @@ void Provisioning::enterProvisioningMode() {
 }
 
 bool Provisioning::isProvisioningRequired() {
-    return !SecureCredentials::isProvisioned();
+    return !SecureCredentials::g_secureCredentials.hasCredentials();
 }
 
 void Provisioning::runProvisioningWizard() {
@@ -37,7 +37,7 @@ void Provisioning::promptWiFiCredentials() {
     String ssid = readSerialInput("Enter WiFi SSID: ", false);
     String password = readSerialInput("Enter WiFi Password: ", true);
     
-    if (SecureCredentials::setWiFiCredentials(ssid.c_str(), password.c_str())) {
+    if (SecureCredentials::g_secureCredentials.storeWiFiCredentials(ssid.c_str(), password.c_str())) {
         Serial.println("✅ WiFi credentials stored\n");
     } else {
         Serial.println("❌ Failed to store WiFi credentials\n");
@@ -50,9 +50,11 @@ void Provisioning::promptOCPPCredentials() {
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
     String chargerId = readSerialInput("Enter Charger ID: ", false);
-    String serverUrl = readSerialInput("Enter OCPP Server URL (wss://...): ", false);
+    String serverHost = readSerialInput("Enter OCPP Server Host (e.g. ocpp.rivotmotors.com): ", false);
+    String serverPortStr = readSerialInput("Enter OCPP Port (default 443): ", false);
+    uint16_t port = serverPortStr.length() > 0 ? serverPortStr.toInt() : 443;
     
-    if (SecureCredentials::setOCPPCredentials(chargerId.c_str(), serverUrl.c_str())) {
+    if (SecureCredentials::g_secureCredentials.storeOCPPCredentials(serverHost.c_str(), port, chargerId.c_str())) {
         Serial.println("✅ OCPP credentials stored\n");
     } else {
         Serial.println("❌ Failed to store OCPP credentials\n");
