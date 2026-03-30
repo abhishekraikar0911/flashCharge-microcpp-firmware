@@ -9,22 +9,23 @@
 #include <MicroOcpp/Model/ConnectorBase/Connector.h>
 // SECURITY FIX: Removed hardcoded secrets.h, using secure configuration
 #include "config/secure_config.h"
-#include "header.h"
-#include "utils/debug_logger.h"
-#include "ocpp/ocpp_client.h"
+#include "system/DebugLogger.h"
+#include "services/OcppClient.h"
 #include "config/production_config.h"
-#include "modules/wifi_manager.h"
-#include "modules/network_manager.h"
-#include "modules/health_monitor.h"
+#include "system/WifiManager.h"
+#include "system/NetworkManager.h"
+#include "system/HealthMonitor.h"
 // PHASE 4: Removed ocpp_state_machine.h — library manages state internally
-#include "modules/security_manager.h"
-#include "modules/ota_manager.h"
-#include "drivers/can_twai_driver.h"
-#include "drivers/can_mcp2515_driver.h"
+#include "system/SecurityManager.h"
+#include "system/OtaManager.h"
 #include "config/version.h"
 #include "config/hardware.h"
-#include "modules/hardware_service.h"
-#include "utils/safe_serial.h"
+#include "system/SafeSerial.h"
+// HAL v2: New service coordinator replacing HardwareService progressively
+#include "system/SystemMonitor.h"
+// HAL v1 – BSP entry point (populates g_app)
+#include "bsp/esp32_rev1/bsp_init.h"
+#include "system/SystemState.h"
 
 extern void processDebugCommand(char c);
 
@@ -76,9 +77,22 @@ void ocppTask(void *pvParameters)
 void setup()
 {
     Serial.begin(115200);
-    // STABILITY: 5s initial delay for power-on rails to stabilize 
-    // especially for GSM and CAN transceivers.
-    delay(5000); 
+
+    // STABILITY: 10s initial delay for power-on rails to stabilize and allow monitor connection
+    // CAN transceivers, MCP2515, and GSM modem all need rails stable before init.
+    delay(10000);
+
+    // ═══════════════════════════════════════════════════════════
+    // HAL v1 BOOTSTRAP — Populate g_app with HAL and Driver refs
+    // Placed AFTER delay(5000) so all power rails (CAN, SPI, GSM) are stable.
+    // Old drivers remain active in parallel during migration.
+    // ═══════════════════════════════════════════════════════════
+    if (!BSP_Init()) {
+        Serial.println("[BSP] CRITICAL: BSP_Init() failed! Hardware may be partially initialized.");
+    } else {
+        Serial.println("[BSP] HAL layer initialized. AppContext populated.");
+    }
+
 
     // Route MicroOcpp logs through SafeSerial to prevent line interleaving 
     // Output often exceeds the 64-byte UART TX buffer, causing yields
@@ -141,6 +155,13 @@ void setup()
         case ESP_RST_SDIO:    Serial.println("(SDIO reset)"); break;
         default:              Serial.println("(Unknown reset)"); break;
     }
+
+    // If reset was not a clean power-on, a transaction may have been running.
+    // Log it clearly so the extended validation test suite can verify Power Restart behavior.
+    if (reset_reason != ESP_RST_POWERON) {
+        SystemState::instance().setStopReason(StopReason::POWER_RESTART);
+    }
+
     
     // *** DIAGNOSTIC: Check if rebooting too quickly (indicates crash loop) ***
     // Uses persistent reboot counter — works across full power cycles.
@@ -151,9 +172,6 @@ void setup()
     }
 
 
-
-    // Initialize global variables and mutexes
-    initGlobals();
 
     // CRITICAL FIX #1: Initialize NVS (flash storage) FIRST
     Serial.println("[System] 💾 Initializing NVS Flash...");
@@ -246,22 +264,27 @@ void setup()
         lastLogged = millis();
     }
 
-    // Initialize CAN buses
-    Serial.println("[System] 🚌 Initializing dual CAN buses...");
+    // CAN buses are now initialized by BSP_Init() above via Esp32Can and Esp32MCP2515.
+    // Legacy direct CAN drivers are kept alive so existing tasks continue to work
+    // during the migration phase. Both the HAL layer AND legacy layer will be active
+    // in parallel until Phase 4-D cleanup.
+    Serial.println("[System] 🚌 Initializing legacy dual CAN buses (migration phase)...");
     
+    /* Legacy CAN inits disabled to prevent conflict with BSP HAL
     // CAN1 - ISO1050 (TWAI) - Charger Module
     if (!CAN_TWAI::init())
     {
-        Serial.println("[System] ❌ CAN1 (Charger) init failed!");
+        Serial.println("[System] ❌ CAN1 legacy (Charger) init failed!");
     }
     
     // CAN2 - MCP2515 (SPI) - Vehicle BMS
     if (!CAN_MCP2515::init())
     {
-        Serial.println("[System] ❌ CAN2 (BMS) init failed!");
+        Serial.println("[System] ❌ CAN2 legacy (BMS) init failed!");
     }
+    */
 
-    // Create CAN1 RX task (Charger) - HIGH PRIORITY (priority 8)
+    /* Legacy CAN tasks disabled to prevent frame theft from HAL drivers
     TaskHandle_t can1RxHandle = nullptr;
     BaseType_t can1RxResult = xTaskCreatePinnedToCore(
         can1_rx_task,
@@ -280,8 +303,9 @@ void setup()
     {
         g_healthMonitor.addTaskToWatchdog(can1RxHandle, "CAN1_RX");
     }
+    */
 
-    // Create CAN2 RX task (BMS) - HIGH PRIORITY (priority 8)
+    /* Legacy CAN tasks disabled to prevent frame theft from HAL drivers
     TaskHandle_t can2RxHandle = nullptr;
     BaseType_t can2RxResult = xTaskCreatePinnedToCore(
         can2_rx_task,
@@ -300,27 +324,8 @@ void setup()
     {
         g_healthMonitor.addTaskToWatchdog(can2RxHandle, "CAN2_RX");
     }
+    */
 
-    // Create charger communication task - HIGH PRIORITY (priority 7)
-    TaskHandle_t chargerHandle = nullptr;
-    BaseType_t chargerResult = xTaskCreatePinnedToCore(
-        chargerCommTask,
-        "CHARGER_COMM",
-        TASK_STACK_SIZE_CHARGER_COMM,
-        nullptr,
-        TASK_PRIORITY_CHARGER_COMM,
-        &chargerHandle,
-        1);
-    
-    if (chargerResult != pdPASS)
-    {
-        Serial.println("[CRITICAL] Failed to create CHARGER_COMM task!");
-    }
-    else
-    {
-        // SAFETY: Add to watchdog
-        g_healthMonitor.addTaskToWatchdog(chargerHandle, "CHARGER_COMM");
-    }
 
     // FIX #3: Create OCPP task on Core 0 - MEDIUM PRIORITY (priority 3)
     BaseType_t ocppResult = xTaskCreatePinnedToCore(
@@ -341,23 +346,25 @@ void setup()
         g_healthMonitor.addTaskToWatchdog(ocppTaskHandle, "OCPP_LOOP");
     }
 
-    // Create UI task for serial menu - LOWEST PRIORITY
+    // Create UI task for serial menu - Increased priority for responsiveness
     BaseType_t uiResult = xTaskCreatePinnedToCore(
         [](void *arg)
         {
+            Serial.println("[UI_TASK] Serial input listener started");
             while (true)
             {
-                if (Serial.available()) {
+                // Consume all available characters to prevent buffer buildup
+                while (Serial.available() > 0) {
                     char c = Serial.read();
                     processDebugCommand(c);
                 }
-                vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(50)); // Poll at 20Hz
             }
         },
         "UI_TASK",
         4096,
         nullptr,
-        2,
+        3, // priority 3
         nullptr,
         1);
     
@@ -409,8 +416,9 @@ void setup()
     // This prevents the race condition that was causing crashes
     // Connector plug detection is configured in ocpp_manager.cpp
 
-    // CRITICAL: Initialize hardware monitoring service
-    g_hardwareService.begin();
+    // CRITICAL: hardware_service removed
+    // HAL v2: Initialize new service coordinator (parallel during migration)
+    prod::SystemMonitor::instance().begin();
 
     // M7 FIX: Create HW_SVC task on Core 1 (priority 4) for deterministic hardware polling
     // This removes the dependency on the weak Arduino loop() handler.
@@ -422,10 +430,12 @@ void setup()
                 // Feed the watchdog! Without this, the ESP32 crashes exactly 30s after boot.
                 g_healthMonitor.feed();
                 
-                // Wait for OCPP to initialize before polling hardware that interacts with Connector state
-                if (SystemState::instance().getOcppInitialized()) {
-                    g_hardwareService.poll();
-                }
+                // ARCHITECTURE FIX: SystemMonitor must run ALWAYS — not gated on OCPP.
+                // ChargerService calls charger->update() + bms->update() every cycle.
+                // If we wait for OCPP to connect, lastTelemetryTime stays 0 and
+                // isReady() returns false permanently → Healthy=NO.
+                prod::SystemMonitor::instance().poll();
+                
                 vTaskDelay(pdMS_TO_TICKS(50)); // Poll at 20Hz
             }
         },
