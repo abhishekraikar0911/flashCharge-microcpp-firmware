@@ -7,6 +7,11 @@ namespace prod {
 
 void SafetyService::begin() {
     if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "SAFETY_SVC", "Started");
+    
+    // Initialize the Normally Closed E-Stop pin with an internal Pull-Up resistor
+    if (g_app.gpio) {
+        g_app.gpio->setMode(BTN_ESTOP, IGpio::GPIO_INPUT_PULLUP);
+    }
 }
 
 void SafetyService::poll() {
