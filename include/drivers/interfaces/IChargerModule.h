@@ -25,6 +25,13 @@ public:
      */
     virtual bool startCharging(float targetVoltage, float maxCurrent) = 0;
 
+    /**
+     * Dynamically update the current/voltage limits while a transaction is running.
+     * @param targetVoltage  Desired output voltage in Volts
+     * @param maxCurrent     Maximum output current in Amps
+     */
+    virtual void updateLimits(float targetVoltage, float maxCurrent) = 0;
+
     /** Request the charger module to stop outputting power */
     virtual bool stopCharging() = 0;
 

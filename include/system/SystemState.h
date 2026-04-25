@@ -32,11 +32,12 @@ enum class StopReason : uint8_t {
     EMERGENCY_STOP  = 2,  // Physical E-Stop button pushed
     BMS_TIMEOUT     = 3,  // BMS CAN silent for >5 s during charge
     OVERTEMP        = 4,  // Charger temperature exceeded 70°C
-    FAULT           = 5,  // BMS safety flag off or voltage out-of-range
+    FAULT           = 5,  // BMS voltage out-of-range
     CAN_TIMEOUT     = 6,  // Charger module CAN lost (HAL hasFault)
     NETWORK_LOSS    = 7,  // GSM/WiFi offline >30 s during charge
     POWER_RESTART   = 8,  // ESP32 rebooted (WDT/panic/brownout)
     UNKNOWN         = 9,  // Catch-all for library-driven stops
+    BMS_SWITCH_OFF  = 10, // BMS explicitly commanded charger switch off (0x01)
 };
 
 // Returns a human-readable string for a StopReason value.
@@ -50,6 +51,7 @@ static inline const char* stopReasonStr(StopReason r) {
         case StopReason::CAN_TIMEOUT:    return "CAN Timeout";
         case StopReason::NETWORK_LOSS:   return "Network Loss";
         case StopReason::POWER_RESTART:  return "Power Restart";
+        case StopReason::BMS_SWITCH_OFF: return "BMS Charger Switch OFF";
         case StopReason::UNKNOWN:        return "Unknown";
         default:                         return "None";
     }

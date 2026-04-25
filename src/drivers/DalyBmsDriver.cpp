@@ -94,15 +94,85 @@ void DalyBmsDriver::updateSystemStatus(float _terminalVolt, float _terminalCurr,
 }
 
 void DalyBmsDriver::update() {
+    uint32_t now = timer.millis();
+
+    // --- [P1] Bus-Off Health Guard — Exponential Backoff Recovery ---
+    //
+    // Problem observed in logs: MCP2515 resets, rejoins bus, isHealthy()=true,
+    // TX immediately attempted → ERROR_FAILTX (bus not yet settled) →
+    // TEC skyrockets → Bus-Off in <50ms → repeat every 1 second forever.
+    //
+    // Fix 1: Exponential backoff — reset interval doubles each failure
+    //         (1s → 2s → 4s → ... → 30s max). Prevents bus hammering.
+    // Fix 2: 500ms post-reset TX blackout — RX is allowed, TX is blocked.
+    //         Gives bus time to settle and TEC/REC counters to drain.
+    //
+    static uint32_t lastBusOffResetMs  = 0;
+    static uint32_t busOffBackoffMs    = 1000;  // Start 1s, doubles on each failure
+    static uint32_t consecutiveHealthy = 0;
+
+    if (!can.isHealthy()) {
+        consecutiveHealthy = 0;
+        if (now - lastBusOffResetMs > busOffBackoffMs) {
+            lastBusOffResetMs = now;
+            logger.logf(ILogger::Level::ERROR, "DalyBMS",
+                       "CAN Bus-Off — recovery reset (backoff=%lums)",
+                       (unsigned long)busOffBackoffMs);
+            can.reset();
+            // Double backoff each failure, cap at 30s
+            busOffBackoffMs = (busOffBackoffMs < 30000) ? (busOffBackoffMs * 2) : 30000;
+        }
+        return;
+    }
+
+    // CAN is healthy — count consecutive healthy poll cycles.
+    // Reset backoff after 10 consecutive healthy cycles (~500ms at 50ms poll rate).
+    consecutiveHealthy++;
+    if (consecutiveHealthy >= 10) {
+        busOffBackoffMs    = 1000; // Reset backoff — bus is stable again
+        consecutiveHealthy = 10;   // Cap to prevent overflow
+    }
+
+    // --- [P1] Post-Reset TX Stabilization: 500ms blackout after Bus-Off recovery ---
+    // During stabilization: RX is allowed (drain queue), TX is suppressed.
+    // This prevents immediately hammering a freshly-reset bus with extended frames
+    // before TEC/REC counters have had a chance to drain from the previous errors.
+    bool inStabilization = (lastBusOffResetMs > 0) && (now - lastBusOffResetMs < 500);
+    if (inStabilization) {
+        // RX only — drain the software queue so frames don't get stale
+        CanFrame rxFrame;
+        while (can.receive(rxFrame)) {
+            if (rxFrame.len < 8) continue;
+            if (rxFrame.id == BMS_REQUEST_ID) {
+                lastMessageTimeMs = now;
+                uint16_t vmax_raw = ((uint16_t)rxFrame.data[0] << 8) | rxFrame.data[1];
+                if (vmax_raw / 10.0f < 20.0f) continue;
+                packVoltage = vmax_raw / 10.0f;
+                uint16_t imax_raw = ((uint16_t)rxFrame.data[2] << 8) | rxFrame.data[3];
+                maxCurrent  = imax_raw / 10.0f;
+                faultFlags  = rxFrame.data[4];
+            } else if (rxFrame.id == SOC_RESPONSE_ID) {
+                uint16_t soc_raw = ((uint16_t)rxFrame.data[6] << 8) | rxFrame.data[7];
+                if (soc_raw != 0xFFFF && (soc_raw / 10.0f) <= 100.0f) {
+                    soc = soc_raw / 10.0f;
+                }
+            }
+        }
+        return; // No TX during stabilization
+    }
+
     // --- Periodic TX ---
-    uint32_t txInterval = isConnected() ? TX_INTERVAL_MS : (TX_INTERVAL_MS * 5); // Slow down polling if unplugged
-    if (timer.millis() - lastTxTimeMs >= txInterval) {
-        sendHeartbeat(sysTerminalVolt, sysTerminalCurr, sysStatusFlags);
-        sendSocRequest();
+    uint32_t txInterval = isConnected() ? TX_INTERVAL_MS : (TX_INTERVAL_MS * 5);
+    if (now - lastTxTimeMs >= txInterval) {
+        // HARDWARE WORKAROUND: MCP2515 is in Listen-Only mode because the TJA1050
+        // transceiver crashes (Bus-Off) when attempting to drive the 60-ohm vehicle bus.
+        // We disable all TX to the BMS. The BMS broadcasts 1806E5F4 automatically anyway!
+        // sendHeartbeat(sysTerminalVolt, sysTerminalCurr, sysStatusFlags);
+        // sendSocRequest();
         lastTxTimeMs = timer.millis();
     }
 
-    // --- RX: drain the MCP2515 queue ---
+    // --- RX: drain the MCP2515 software queue ---
     CanFrame rxFrame;
 
     while (can.receive(rxFrame)) {
@@ -114,6 +184,7 @@ void DalyBmsDriver::update() {
 
             // Byte 0-1: Vmax (×0.1V)
             uint16_t vmax_raw = ((uint16_t)rxFrame.data[0] << 8) | rxFrame.data[1];
+            
             // Plausibility: reject values below 20V (bus noise)
             if (vmax_raw / 10.0f < 20.0f) continue;
 
@@ -125,9 +196,6 @@ void DalyBmsDriver::update() {
 
             // Byte 4: Fault/status flags
             faultFlags = rxFrame.data[4];
-
-            logger.logf(ILogger::Level::DEBUG, "DalyBMS", "RX 0x1806E5F4: Vmax=%.1fV Imax=%.1fA Flags=0x%02X",
-                          packVoltage, maxCurrent, faultFlags);
         }
 
         // --- Frame: SOC response 0x18904001 ---

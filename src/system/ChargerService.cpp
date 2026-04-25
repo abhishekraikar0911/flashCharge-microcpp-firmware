@@ -44,6 +44,24 @@ void ChargerService::poll() {
         state.setBmsSafeToCharge(g_app.bms->isSafeToCharge());
         state.setChargingSwitch(g_app.bms->isSafeToCharge());
         state.setLastBMS(now);
+
+        // Dynamically update charger limits if charging is actively running
+        if (state.getTransactionActive() && g_app.charger) {
+            static float lastSentImax = -1.0f;
+            static float lastSentVmax = -1.0f;
+            float newVmax = state.getBMS_Vmax();
+            float newImax = state.getBMS_Imax();
+
+            if (newVmax > 10.0f && newImax >= 0.0f && 
+                (abs(newVmax - lastSentVmax) >= 0.1f || abs(newImax - lastSentImax) >= 0.1f)) {
+                
+                g_app.charger->updateLimits(newVmax, newImax);
+                lastSentVmax = newVmax;
+                lastSentImax = newImax;
+                
+                if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "CHARGER_SVC", "Dynamic limit update: Vmax=%.1fV Imax=%.1fA", newVmax, newImax);
+            }
+        }
     }
 
     // 3. Sync Charger telemetry to SystemState

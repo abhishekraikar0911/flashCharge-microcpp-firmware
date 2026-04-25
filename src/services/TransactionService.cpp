@@ -113,12 +113,11 @@ void OcppTransactionManager::handleStartTx(MicroOcpp::Transaction* tx) {
     if (g_app.charger) {
         float bmsVmax = SystemState::instance().getBMS_Vmax();
         float bmsImax = SystemState::instance().getBMS_Imax();
-        if (bmsVmax > 10.0f && bmsImax > 0.0f) {
+        if (bmsVmax > 10.0f && bmsImax > 0.0f && SystemState::instance().getBmsSafeToCharge()) {
             g_app.charger->startCharging(bmsVmax, bmsImax);
             Serial.printf("[TX_MGR] ⚡ HAL charger started: Vmax=%.1fV Imax=%.1fA\n", bmsVmax, bmsImax);
         } else {
-            g_app.charger->startCharging(84.0f, 10.0f); // Safe defaults
-            Serial.println("[TX_MGR] ⚡ HAL charger started: safe defaults (84V / 10A)");
+            Serial.println("[TX_MGR] ⚠️ BMS parameters invalid or safe-to-charge is false. Hardware charger NOT started!");
         }
     }
 
@@ -217,6 +216,11 @@ void OcppTransactionManager::startLocalTransaction(const char* idTag) {
     
     if (g_app.charger && g_app.charger->hasFault()) {
         Serial.println("[TX_MGR] ⚠️ Cannot start local transaction: Charger implies fault!");
+        return;
+    }
+
+    if (!SystemState::instance().getBmsSafeToCharge()) {
+        Serial.println("[TX_MGR] ⚠️ Cannot start local transaction: BMS reports NOT safe to charge (switch off or faulted)!");
         return;
     }
 

@@ -33,6 +33,7 @@ public:
     bool init() override;
     
     bool startCharging(float targetVoltage, float maxCurrent) override;
+    void updateLimits(float targetVoltage, float maxCurrent) override;
     bool stopCharging() override;
     
     bool getTelemetry(float& volts, float& amps, float& temp) override;

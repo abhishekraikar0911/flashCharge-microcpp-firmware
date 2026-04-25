@@ -25,9 +25,9 @@ namespace SecureConfig
             bool migrationDone = prefs.getBool(MIGRATION_KEY, false);
             prefs.end();
             
-            if (migrationDone)
+            if (migrationDone && SecureCredentials::g_secureCredentials.hasCredentials())
             {
-                Serial.println("[SECURE_CONFIG] ✅ Migration already completed");
+                Serial.println("[SECURE_CONFIG] ✅ Migration already completed and credentials exist");
                 return true;
             }
         }

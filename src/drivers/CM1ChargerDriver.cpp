@@ -40,6 +40,13 @@ bool CM1ChargerDriver::startCharging(float targetVoltage, float maxCurrent) {
     return ok;
 }
 
+void CM1ChargerDriver::updateLimits(float targetVoltage, float maxCurrent) {
+    if (isOutputEnabled) {
+        currentVmax = targetVoltage;
+        currentImax = maxCurrent;
+    }
+}
+
 bool CM1ChargerDriver::stopCharging() {
     isOutputEnabled = false;
     currentImax = 0.0f;

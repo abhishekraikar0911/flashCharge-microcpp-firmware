@@ -15,11 +15,11 @@
 #define CAN1_RX_PIN GPIO_NUM_22
 #define CAN1_BAUDRATE 250000
 
-// CAN2 - MCP2515 (SPI) - Vehicle BMS (CONSOLIDATED LEFT SIDE)
-#define CAN2_CS_PIN   26
-#define CAN2_SCK_PIN  14
-#define CAN2_MOSI_PIN 27
-#define CAN2_MISO_PIN 25    // MOVED from 12 to avoid Strapping Pin conflict (MTDI)
+// CAN2 - MCP2515 (SPI) - Vehicle BMS (VSPI Pins)
+#define CAN2_CS_PIN   5     // Changed to 5
+#define CAN2_SCK_PIN  18    // Changed to 18
+#define CAN2_MOSI_PIN 23    // Changed to 23 (SI)
+#define CAN2_MISO_PIN 19    // Changed to 19 (SO)
 #define CAN2_INT_PIN  34    // CONNECTED: Using Interrupt Mode
 #define CAN2_BAUDRATE 250000
 #define MCP2515_CRYSTAL_8MHZ 
@@ -39,7 +39,7 @@
 // ========== GSM MODEM CONFIGURATION (SIM A7670C) ==========
 #define GSM_TX_PIN        17         // ESP32 TX → Modem RXD (UART2)
 #define GSM_RX_PIN        16         // ESP32 RX ← Modem TXD (UART2)
-#define GSM_RESET_PIN     23         // Modem RESET (Left Side - Pulse 2.5s)
+#define GSM_RESET_PIN     27         // Modem RESET — moved from 23 (GPIO 23 now = MCP2515 MOSI)
 #define GSM_BAUD_RATE     115200
 #define GSM_SERIAL        Serial2    // Hardware UART2
 

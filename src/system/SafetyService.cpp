@@ -93,12 +93,12 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
     if (now - _lastBmsSafetyCheck >= 100) {
         if (snap.bmsSafeToCharge != _lastBmsSafe) {
             if (!snap.bmsSafeToCharge) {
-                if (g_app.logger) g_app.logger->log(ILogger::Level::ERROR, "SAFETY", "🚨 BMS flagged unsafe");
+                if (g_app.logger) g_app.logger->log(ILogger::Level::ERROR, "SAFETY", "🚨 BMS Charger Switch OFF (flag 0x01)");
                 if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
                     SystemState::instance().setFaultLockActive(true);
                     SystemState::instance().setFaultLockTime(now);
-                    SystemState::instance().setStopReason(StopReason::FAULT);
-                    ocpp::endTransactionSafe(nullptr, "EmergencyStop");
+                    SystemState::instance().setStopReason(StopReason::BMS_SWITCH_OFF);
+                    ocpp::endTransactionSafe(nullptr, "Other");
                 }
             } else {
                 if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "SAFETY", "BMS charging enabled");

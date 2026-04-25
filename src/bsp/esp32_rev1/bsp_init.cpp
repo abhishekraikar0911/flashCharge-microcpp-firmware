@@ -64,8 +64,9 @@ static Esp32Uart         s_modemUart(2, GSM_TX_PIN, GSM_RX_PIN);
 // CAN1: Internal TWAI (Charger Module) — (txPin, rxPin, rxQueueSize, txQueueSize)
 static Esp32Can          s_can1(CAN1_TX_PIN, CAN1_RX_PIN, CAN_RX_QUEUE_SIZE, CAN_TX_QUEUE_SIZE);
 
-// CAN2: External MCP2515 over SPI (BMS) — (csPin, oscillatorFreq)
-static Esp32MCP2515      s_can2(CAN2_CS_PIN, MCP_8MHZ);
+// CAN2: External MCP2515 over SPI (BMS) — (csPin, oscillatorFreq, intPin)
+// GPIO 34 = MCP2515 INT (active-LOW, input-only). Enables true ISR-driven RX.
+static Esp32MCP2515      s_can2(CAN2_CS_PIN, MCP_8MHZ, CAN2_INT_PIN);
 
 // ---- System Layer ----
 static FlashConfig       s_config(s_flash);
@@ -112,8 +113,12 @@ bool BSP_Init() {
     }
 
     // ---- Step 5: CAN2 (BMS MCP2515 over SPI) ----
+    // [P2] Set SPI clock to 8 MHz — matches MCP2515 crystal frequency.
+    // Default Arduino-ESP32 SPI is ~4 MHz; 8 MHz halves drain time per frame,
+    // giving the CAN2_RX task more headroom to service HW buffers before overflow.
     SPI.begin(CAN2_SCK_PIN, CAN2_MISO_PIN, CAN2_MOSI_PIN, CAN2_CS_PIN);
-    delay(10); 
+    SPI.setFrequency(8000000); // 8 MHz — maximum safe speed for MCP2515
+    delay(10);
 
     if (!s_can2.init(CAN2_BAUDRATE)) {
         s_logger.log(ILogger::Level::ERROR, "BSP", "CAN2 (MCP2515) init failed!");
@@ -132,4 +137,28 @@ bool BSP_Init() {
 
     s_logger.log(ILogger::Level::INFO, "BSP", "BSP_Init() complete.");
     return true;
+}
+
+// =============================================================================
+// BSP_DrainCAN2() — Called by dedicated CAN2_RX FreeRTOS task (priority 8)
+// =============================================================================
+/**
+ * Drains the MCP2515 hardware RX buffers into the internal software queue.
+ * Keeping this here (BSP layer) means main.cpp never needs to know about the
+ * concrete Esp32MCP2515 type — it stays fully encapsulated in the BSP.
+ */
+void BSP_DrainCAN2() {
+    s_can2.drainHardwareBuffer();
+}
+
+// =============================================================================
+// BSP_SetCAN2RxTask() — Register CAN2_RX FreeRTOS task for INT-driven wake-up
+// =============================================================================
+/**
+ * Call this AFTER xTaskCreate() for the CAN2_RX task.
+ * Passes the task handle into the MCP2515 driver so the GPIO 34 ISR can
+ * call vTaskNotifyGiveFromISR() to wake it instantly on each frame arrival.
+ */
+void BSP_SetCAN2RxTask(TaskHandle_t handle) {
+    s_can2.setNotifyTask(handle);
 }

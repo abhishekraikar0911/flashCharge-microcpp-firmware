@@ -13,12 +13,12 @@
  * 3. Remove secrets.h from version control after migration
  */
 
-#include "config/secure_credentials.h"
+#include "utils/secure_credentials.h"
 
 namespace SecureConfig
 {
     // Default configuration (non-sensitive)
-    #define DEFAULT_CHARGER_MODEL "flashCharger"
+    #define DEFAULT_CHARGER_MODEL "flashCharge1"
     #define DEFAULT_CHARGER_VENDOR "Rivot Motors"
     #define DEFAULT_CSMS_PATH "/ocpp16"
 
