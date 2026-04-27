@@ -78,7 +78,7 @@
 #define ALERT_TEMP_WARNING_C  60.0f   // H2 FIX: Graduated — throttle/warn at 60°C
 #define ALERT_TEMP_CRITICAL_C 70.0f   // Emergency stop at 70°C (unchanged)
 #define ALERT_VOLTAGE_MIN_V 56.0f
-#define ALERT_VOLTAGE_MAX_V 84.0f  // Increased from 95V to accommodate transients
+#define ALERT_VOLTAGE_MAX_V 95.0f  // Changed to 95V to accommodate 92V batteries without false OverVoltage faults
 #define ALERT_CURRENT_MAX_A 100.0f
 
 // ========== FAULT STABILIZATION ==========

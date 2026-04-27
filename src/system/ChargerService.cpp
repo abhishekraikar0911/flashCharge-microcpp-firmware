@@ -27,7 +27,10 @@ void ChargerService::poll() {
     auto snap = SystemState::instance().snapshot();
     if (g_app.bms) {
         uint8_t flags = 0;
-        if (!snap.chargerModuleOnline) flags |= 0x01; // Hardware failure
+        // Bit 0 = Hardware failure: module is offline only if it isn't online AND isn't actively
+        // delivering voltage (active voltage proves the module is physically working).
+        bool moduleOnline = snap.chargerModuleOnline || (snap.terminalVolt > 10.0f);
+        if (!moduleOnline) flags |= 0x01;
         if (snap.chargerTemp > 70.0f)  flags |= 0x02; // Over-temperature
         if (!snap.batteryConnected)    flags |= 0x08; // Not connected
         if (snap.lastBMS > 0 && (now - snap.lastBMS) > 5000) flags |= 0x10; // BMS timeout
@@ -77,6 +80,17 @@ void ChargerService::poll() {
             // Sync terminal values for UI/OCPP
             state.setTerminalVolt(v);
             state.setTerminalCurr(i);
+
+            // Periodically log actual terminal telemetry while charging
+            if (state.getTransactionActive()) {
+                static uint32_t lastTelemLog = 0;
+                if (now - lastTelemLog > 5000) {
+                    lastTelemLog = now;
+                    if (g_app.logger) {
+                        g_app.logger->logf(ILogger::Level::INFO, "TELEM", "Terminal: %.1fV %.1fA | BMS SOC: %.1f%%", v, i, state.getSocPercent());
+                    }
+                }
+            }
         }
     }
 

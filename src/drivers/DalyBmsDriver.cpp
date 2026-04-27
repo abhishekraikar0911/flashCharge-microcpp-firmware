@@ -164,11 +164,9 @@ void DalyBmsDriver::update() {
     // --- Periodic TX ---
     uint32_t txInterval = isConnected() ? TX_INTERVAL_MS : (TX_INTERVAL_MS * 5);
     if (now - lastTxTimeMs >= txInterval) {
-        // HARDWARE WORKAROUND: MCP2515 is in Listen-Only mode because the TJA1050
-        // transceiver crashes (Bus-Off) when attempting to drive the 60-ohm vehicle bus.
-        // We disable all TX to the BMS. The BMS broadcasts 1806E5F4 automatically anyway!
-        // sendHeartbeat(sysTerminalVolt, sysTerminalCurr, sysStatusFlags);
-        // sendSocRequest();
+        // Normal TX to BMS. The new MCP2515 hardware supports sending.
+        sendHeartbeat(sysTerminalVolt, sysTerminalCurr, sysStatusFlags);
+        sendSocRequest();
         lastTxTimeMs = timer.millis();
     }
 

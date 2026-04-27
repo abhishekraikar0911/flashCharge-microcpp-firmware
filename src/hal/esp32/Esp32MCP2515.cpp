@@ -69,13 +69,13 @@ bool Esp32MCP2515::init(uint32_t baudrate) {
     // This MUST happen before setNormalMode/setListenOnlyMode.
     applyFilters();
 
-    // Step 4: Enter Listen-Only mode to safely receive without hardware transmission errors
-    if (mcp->setListenOnlyMode() != MCP2515::ERROR_OK) {
-        Serial.println("[HAL_CAN2] ❌ setListenOnlyMode() failed!");
+    // Step 4: Enter Normal mode to allow full two-way communication (TX/RX)
+    if (mcp->setNormalMode() != MCP2515::ERROR_OK) {
+        Serial.println("[HAL_CAN2] ❌ setNormalMode() failed!");
         xSemaphoreGive(mutex);
         return false;
     }
-    Serial.println("[HAL_CAN2] 📡 Listen-Only Mode Active (RX Only)");
+    Serial.println("[HAL_CAN2] 📡 Normal Mode Active (TX/RX)");
 
     isInit = true;
     xSemaphoreGive(mutex);
