@@ -20,7 +20,7 @@
 #define CAN2_SCK_PIN  18    // Changed to 18
 #define CAN2_MOSI_PIN 23    // Changed to 23 (SI)
 #define CAN2_MISO_PIN 19    // Changed to 19 (SO)
-#define CAN2_INT_PIN  34    // CONNECTED: Using Interrupt Mode
+#define CAN2_INT_PIN  34    // CONNECTED: MCP2515 INT — INPUT ONLY, no internal pull-up (MCP2515 drives it actively, external pull-up on module)
 #define CAN2_BAUDRATE 250000
 #define MCP2515_CRYSTAL_8MHZ 
 
@@ -65,11 +65,15 @@
 #define LED_CHARGER_STATUS     13         // D13: Green/Yellow Charger Status
 #define LED_NETWORK_STATUS     15         // D15: Blue/White Network Status
 #define BTN_ESTOP              32         // Emergency Stop (Active LOW) - MOVED to 32
-#define BTN_REBOOT             35         // System Reboot (Active LOW)
+#define BTN_REBOOT             35         // System Reboot — INPUT ONLY, NO internal pull-up (needs 10K ext. pull-up to 3.3V)
+#define BTN_START              33         // Local Start button (Active LOW, INPUT_PULLUP)
+#define BTN_STOP               26         // Local Stop button  (Active LOW, INPUT_PULLUP)
+#define LED_FAULT_STATUS       4          // Fault indicator LED (Active HIGH — ON = fault active)
 
 // ========== SAFETY LIMITS ==========
+// Note: Use ALERT_VOLTAGE_MIN_V / ALERT_VOLTAGE_MAX_V from the ALERT THRESHOLDS section below
+// for all runtime voltage checks. These are kept for legacy references only.
 #define MIN_VOLTAGE_V 56.0f
-#define MAX_VOLTAGE_V 86.0f  // Increased from 95V to accommodate transients
 #define MAX_CURRENT_A 100.0f
 #define MAX_TEMPERATURE_C 95.0f
 #define BATTERY_CAPACITY_AH 30.0f
@@ -78,7 +82,7 @@
 #define ALERT_TEMP_WARNING_C  60.0f   // H2 FIX: Graduated — throttle/warn at 60°C
 #define ALERT_TEMP_CRITICAL_C 70.0f   // Emergency stop at 70°C (unchanged)
 #define ALERT_VOLTAGE_MIN_V 56.0f
-#define ALERT_VOLTAGE_MAX_V 95.0f  // Changed to 95V to accommodate 92V batteries without false OverVoltage faults
+#define ALERT_VOLTAGE_MAX_V 92.0f  // Increased to 95V to accommodate 92V batteries without false OverVoltage faults
 #define ALERT_CURRENT_MAX_A 100.0f
 
 // ========== FAULT STABILIZATION ==========

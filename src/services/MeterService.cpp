@@ -1,6 +1,7 @@
 #include "services/MeterService.h"
 #include "services/OcppClient.h"
 #include "system/SystemState.h"
+#include "config/hardware.h"
 #include <MicroOcpp.h>
 #include <MicroOcpp/Core/Configuration.h>
 #include <functional>
@@ -29,7 +30,7 @@ void OcppMeterService::registerMeters() {
     // 2. Power Meter
     setPowerMeterInput([]() {
         auto snap = SystemState::instance().snapshot();
-        if (snap.terminalVolt >= 56.0f && snap.terminalVolt <= 85.5f) {
+        if (snap.terminalVolt >= ALERT_VOLTAGE_MIN_V && snap.terminalVolt <= ALERT_VOLTAGE_MAX_V) {
             return (int)(snap.terminalVolt * snap.terminalCurr);
         }
         return 0;

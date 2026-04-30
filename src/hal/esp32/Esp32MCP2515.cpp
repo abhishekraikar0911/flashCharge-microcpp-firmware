@@ -292,28 +292,27 @@ void Esp32MCP2515::reset() {
  *   RXB1: served by MASK1 and RXF2, RXF3, RXF4, RXF5
  *
  * Strategy:
- *   RXB0 → accept 0x1806E5F4 (BMS charge request to charger)
- *   RXB1 → accept 0x18904001 (BMS SOC response)
+ *   Both buffers → accept ONLY 0x1806E5F4 (BMS charge request)
+ *   This frame carries Vmax (bytes 0-1), Imax (bytes 2-3),
+ *   Fault flags (byte 4), and SOC (bytes 5-6) — all in one frame.
  *
- * All other IDs (VCU, OBC, any other ECU) are rejected at the hardware level
- * before reaching the 2-frame buffers. This eliminates RX overflow under
- * any realistic vehicle CAN bus load.
+ *   0x18904001 (old SOC response) is now REJECTED at hardware level.
+ *   No separate SOC query is sent — SOC is read from 0x1806E5F4 bytes 5-6.
  */
 void Esp32MCP2515::applyFilters() {
-    // --- RXB0: Accept 0x1806E5F4 (BMS charge request → MCU RX) ---
-    // Full 29-bit mask: every bit must match the filter exactly
+    // --- RXB0: Accept ONLY 0x1806E5F4 ---
     mcp->setFilterMask(MCP2515::MASK0, /*extended=*/true, 0x1FFFFFFF);
     mcp->setFilter(MCP2515::RXF0,      /*extended=*/true, 0x1806E5F4);
     mcp->setFilter(MCP2515::RXF1,      /*extended=*/true, 0x1806E5F4);
 
-    // --- RXB1: Accept 0x18904001 (BMS SOC response → MCU RX) ---
+    // --- RXB1: Accept ONLY 0x1806E5F4 (same — no separate SOC frame needed) ---
     mcp->setFilterMask(MCP2515::MASK1, /*extended=*/true, 0x1FFFFFFF);
-    mcp->setFilter(MCP2515::RXF2,      /*extended=*/true, 0x18904001);
-    mcp->setFilter(MCP2515::RXF3,      /*extended=*/true, 0x18904001);
-    mcp->setFilter(MCP2515::RXF4,      /*extended=*/true, 0x18904001);
-    mcp->setFilter(MCP2515::RXF5,      /*extended=*/true, 0x18904001);
+    mcp->setFilter(MCP2515::RXF2,      /*extended=*/true, 0x1806E5F4);
+    mcp->setFilter(MCP2515::RXF3,      /*extended=*/true, 0x1806E5F4);
+    mcp->setFilter(MCP2515::RXF4,      /*extended=*/true, 0x1806E5F4);
+    mcp->setFilter(MCP2515::RXF5,      /*extended=*/true, 0x1806E5F4);
 
-    Serial.println("[HAL_CAN2] ✅ HW filters: RXB0=0x1806E5F4, RXB1=0x18904001 (all others rejected)");
+    Serial.println("[HAL_CAN2] ✅ HW filters: RXB0=RXB1=0x1806E5F4 only (0x18904001 blocked)");
 }
 
 // ---------------------------------------------------------------------------

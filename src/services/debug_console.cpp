@@ -38,7 +38,7 @@ void processDebugCommand(char c) {
         DebugLogger::printMenu();
     } else if (c == 's' || c == 'S') {
         Serial.println("\n[CONSOLE] 🔌 Local START requested (Unified Trigger)");
-        prod::g_transactionManager.startLocalTransaction("LOCAL_ADMIN_1");
+        prod::g_transactionManager.startLocalTransaction("LOCAL_ADMIN_1"); // see hardware.h LOCAL_START_ID_TAG
     } else if (c == 't' || c == 'T') {
         Serial.println("\n[CONSOLE] 🛑 Local STOP requested (Unified Trigger)");
         prod::g_transactionManager.stopLocalTransaction();

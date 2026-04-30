@@ -39,6 +39,21 @@ namespace
 {
     static SemaphoreHandle_t ocppMutex = nullptr;
 
+    static const char* ocppStatusToString(ChargePointStatus status) {
+        switch (status) {
+            case ChargePointStatus_Available:    return "Available";
+            case ChargePointStatus_Preparing:    return "Preparing";
+            case ChargePointStatus_Charging:     return "Charging";
+            case ChargePointStatus_SuspendedEVSE: return "SuspendedEVSE";
+            case ChargePointStatus_SuspendedEV:   return "SuspendedEV";
+            case ChargePointStatus_Finishing:    return "Finishing";
+            case ChargePointStatus_Reserved:     return "Reserved";
+            case ChargePointStatus_Unavailable:  return "Unavailable";
+            case ChargePointStatus_Faulted:      return "Faulted";
+            default: return "Unknown";
+        }
+    }
+
     static void ensureOcppMutex()
     {
         if (ocppMutex == nullptr)
@@ -85,7 +100,7 @@ bool ocpp::beginTransactionSafe(const char *idTag, unsigned int connectorId)
 // firmware has already made the authorization decision.
 bool ocpp::beginTransactionAuthorizedSafe(const char *idTag, unsigned int connectorId)
 {
-    OcppLock lock;
+    OcppLock lock(5000); // Increased timeout to 5s for manual actions
     if (!lock.ok())
     {
         return false;
@@ -95,7 +110,7 @@ bool ocpp::beginTransactionAuthorizedSafe(const char *idTag, unsigned int connec
 
 bool ocpp::endTransactionSafe(const char *idTag, const char *reason, unsigned int connectorId)
 {
-    OcppLock lock;
+    OcppLock lock(5000); // Increased timeout to 5s for manual actions
     if (!lock.ok())
     {
         return false;
@@ -147,9 +162,6 @@ bool ocpp::ocppPermitsChargeSafe(unsigned int connectorId)
     }
     return ocppPermitsCharge(connectorId);
 }
-
-// Transaction tracking and lock
-static unsigned long lastDataTransferSent = 0;
 
 // Unified connection (GSM + WiFi + Watchdog)
 static prod::UnifiedConnection g_ocppConnection;
@@ -290,18 +302,20 @@ bool ocpp::init()
     });
 
     // 2. Over/Under Voltage Fault
+    // IMPORTANT: Only fires during active charging (chargingEnabled=true).
+    // Post-charge residual battery voltage is normal — must NOT trigger a Faulted state.
     addErrorDataInput([]() -> MicroOcpp::ErrorData {
         auto snap = SystemState::instance().snapshot();
-        if (snap.batteryConnected && snap.terminalVolt > 0.0f) {
+        if (snap.batteryConnected && snap.chargingEnabled && snap.terminalVolt > 0.0f) {
             if (snap.terminalVolt > ALERT_VOLTAGE_MAX_V) {
                 MicroOcpp::ErrorData err("OverVoltage");
-                err.info = "Terminal voltage exceeded maximum";
+                err.info = "Terminal voltage exceeded maximum during active charge";
                 err.vendorId = "RivotMotors";
                 return err;
             }
-            if (snap.terminalVolt < ALERT_VOLTAGE_MIN_V && snap.chargingEnabled) {
+            if (snap.terminalVolt < ALERT_VOLTAGE_MIN_V) {
                 MicroOcpp::ErrorData err("UnderVoltage");
-                err.info = "Terminal voltage below minimum during charge";
+                err.info = "Terminal voltage below minimum during active charge";
                 err.vendorId = "RivotMotors";
                 return err;
             }
@@ -507,6 +521,29 @@ void ocpp::poll()
         };
         const char* name = (currentStatus >= 0 && currentStatus <= 9) ? statusNames[currentStatus] : "UNKNOWN";
         Serial.printf("\n[OCPP_STATE] 🔄 Status changed to: %s\n\n", name);
+
+        // State-based triggers for VehicleInfo: Send exactly on state transitions
+        if (currentStatus == ChargePointStatus_Preparing || currentStatus == ChargePointStatus_Finishing) {
+            auto snap = state.snapshot();
+            if (snap.gunPhysicallyConnected || snap.batteryConnected) {
+                uint8_t vehicleModel = 1;
+                float capacityAh = 30.0f; // Classic
+
+                if (snap.BMS_Imax >= 60.0f) {
+                    vehicleModel = 3; // Max
+                    capacityAh = 90.0f;
+                }
+                else if (snap.BMS_Imax >= 30.0f) {
+                    vehicleModel = 2; // Pro
+                    capacityAh = 60.0f;
+                }
+
+                // Range = (Capacity * SOC) * 2.7 km/Ah
+                float estimatedRange = capacityAh * (snap.socPercent / 100.0f) * 2.7f;
+
+                ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, "ME9NP1411H2172005");
+            }
+        }
     }
 
     static unsigned long lastHealthPoll = 0;
@@ -539,12 +576,36 @@ void ocpp::poll()
                 
                 g_persistence.saveTransaction(txnIdStr, realTag);
                 snap = state.snapshot(); // refresh for log below
+                
+                // State-based trigger for Charging state:
+                // We send it right after TxId is synced, ensuring the handshake guard doesn't block it.
+                if (snap.gunPhysicallyConnected || snap.batteryConnected) {
+                    uint8_t vehicleModel = 1;
+                    float capacityAh = 30.0f; // Classic
+
+                    if (snap.BMS_Imax >= 60.0f) {
+                        vehicleModel = 3; // Max
+                        capacityAh = 90.0f;
+                    }
+                    else if (snap.BMS_Imax >= 30.0f) {
+                        vehicleModel = 2; // Pro
+                        capacityAh = 60.0f;
+                    }
+
+                    // Range = (Capacity * SOC) * 2.7 km/Ah
+                    float estimatedRange = capacityAh * (snap.socPercent / 100.0f) * 2.7f;
+
+                    // Reset handshake guard so it doesn't artificially block this
+                    // sendVehicleInfo handles handshakeGuardStart internally but it won't be blocked here
+                    // because activeTransactionId is now > 0.
+                    ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, "ME9NP1411H2172005");
+                }
             }
         }
 
-        SafeSerial::printf("[SYS] @%lums | LibStatus=%d | Tx=%s | TxId=%d | Chg=%s | Healthy=%s | Op=%d\n",
+        SafeSerial::printf("[SYS] @%lums | Status=%s | Tx=%s | TxId=%d | Chg=%s | Healthy=%s | Op=%d\n",
                      millis(),
-                     getChargePointStatus(1),
+                     ocppStatusToString(getChargePointStatus(1)),
                      snap.transactionActive ? "Active" : "Idle",
                      snap.activeTransactionId,
                      snap.chargingEnabled ? "ON" : "OFF",
@@ -620,8 +681,11 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
         return;
     }
 
-    // Validate critical data only (allow SOC=0)
-    if (voltage <= 0.0f || maxCurrent <= 0.0f) {
+    // Validate: require BMS data (maxCurrent > 0 proves BMS is connected and responding).
+    // NOTE: voltage is intentionally NOT required — it is 0.0 pre-charge (charger module off).
+    // SOC=0 is also valid (vehicle at 0% charge).
+    if (maxCurrent <= 0.0f) {
+        Serial.printf("[OCPP] ⚠️  Skip VehicleInfo: maxCurrent=%.1fA (BMS not ready)\n", maxCurrent);
         return;
     }
 
@@ -636,7 +700,14 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     }
 
     // VehicleInfo logging
-    Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (Pre-Tx):\n");
+    const char* stateLabel = "Unknown";
+    int st = (int)getChargePointStatus(1);
+    if (st == 1) stateLabel = "Preparing";
+    else if (st == 2) stateLabel = "Charging";
+    else if (st == 5) stateLabel = "Finishing";
+    else stateLabel = "Idle";
+
+    Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (%s):\n", stateLabel);
     Serial.printf("  SOC=%.1f%% | Model=%s | Range=%.1fkm | MaxI=%.1fA | VIN=%s\n", soc, modelName, range, maxCurrent, vin);
 
     vehicleInfoPending = true;  // Mark as pending BEFORE queuing

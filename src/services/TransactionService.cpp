@@ -1,6 +1,7 @@
 #include "services/TransactionService.h"
 #include "services/OcppClient.h"
 #include "system/SystemState.h"
+#include "system/ChargerService.h"
 #include "config/hardware.h"
 #include "config/production_config.h"
 #include "system/HealthMonitor.h"
@@ -49,8 +50,12 @@ void OcppTransactionManager::registerConnectorInputs() {
     });
 
     // 2. EV Ready (Preparing -> Charging if transaction active)
+    // MUST be true only when actively charging — NOT just when gun is plugged.
+    // If true while plugged but idle, MicroOcpp skips Finishing → goes to Preparing.
+    // Correct: Charging → Finishing (evReady=false) → Preparing (plug=true, evReady=false)
     setEvReadyInput([]() {
-        return isVehiclePlugged();
+        auto& s = SystemState::instance();
+        return s.getChargingEnabled() && s.getGunPhysicallyConnected();
     });
 
     // 3. HAL v1 STEP 2: EVSE Ready → g_app.charger->isReady() and !hasFault()
@@ -107,6 +112,9 @@ void OcppTransactionManager::handleStartTx(MicroOcpp::Transaction* tx) {
     _stopTxPending = false;
 
     Serial.printf("[TX_MGR] ▶️  Transaction STARTED: txId=%d (Energy reset to 0)\n", txId);
+
+    // Reset dynamic limit tracking so the first BMS update always gets applied
+    ChargerService::instance().resetDynamicLimits();
 
     // HAL v1 STEP 4: Start the charger module through the new driver interface.
     // Uses BMS-reported voltage/current limits from SystemState.
@@ -219,8 +227,13 @@ void OcppTransactionManager::startLocalTransaction(const char* idTag) {
         return;
     }
 
+    // Check BMS connection and safety state with distinct messages
+    if (g_app.bms && !g_app.bms->isConnected()) {
+        Serial.println("[TX_MGR] ⚠️ Cannot start: BMS not yet connected — no CAN frames received. Check BMS cable.");
+        return;
+    }
     if (!SystemState::instance().getBmsSafeToCharge()) {
-        Serial.println("[TX_MGR] ⚠️ Cannot start local transaction: BMS reports NOT safe to charge (switch off or faulted)!");
+        Serial.println("[TX_MGR] ⚠️ Cannot start: BMS Charger Switch is OFF (flag 0x01). Turn ON the vehicle charging switch.");
         return;
     }
 
@@ -244,7 +257,7 @@ void OcppTransactionManager::stopLocalTransaction() {
     // This will natively move state to Finishing and trigger handleStopTx().
     bool success = ocpp::endTransactionSafe(nullptr, "Local", 1);
     if (!success) {
-        Serial.println("[TX_MGR] ❌ MicroOcpp Native API refused local stop (no active session?).");
+        Serial.println("[TX_MGR] ❌ MicroOcpp Native API refused local stop. (Reason: No active session OR Network Mutex Timeout - Try again)");
     }
 }
 

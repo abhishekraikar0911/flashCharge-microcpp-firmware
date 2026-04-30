@@ -170,7 +170,7 @@ void processSerialInput()
     case 's':
     case 'S':
         Serial.println("[CONSOLE] 🔌 Local START requested (System Button)");
-        prod::g_transactionManager.startLocalTransaction("LOCAL_ADMIN_1");
+        prod::g_transactionManager.startLocalTransaction("LOCAL_ADMIN_1"); // see hardware.h LOCAL_START_ID_TAG
         break;
     case 't':
     case 'T':

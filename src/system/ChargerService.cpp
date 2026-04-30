@@ -9,14 +9,28 @@ void ChargerService::begin() {
     if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "CHARGER_SVC", "Started");
 }
 
+void ChargerService::resetDynamicLimits() {
+    _lastSentImax = -1.0f;
+    _lastSentVmax = -1.0f;
+    if (g_app.logger) g_app.logger->log(ILogger::Level::DEBUG, "CHARGER_SVC", "Dynamic limit tracking reset for new session");
+}
+
 void ChargerService::poll() {
     uint32_t now = g_app.timer ? g_app.timer->millis() : 0;
+    auto snap = SystemState::instance().snapshot(); // Take snapshot once at top
     static uint32_t lastDiagLog = 0;
     bool shouldLog = (now - lastDiagLog > 5000);
     if (shouldLog) {
         lastDiagLog = now;
-        if (g_app.logger) g_app.logger->logf(ILogger::Level::DEBUG, "CHARGER_SVC", "poll() - Charger:%s BMS:%s", 
-                                             g_app.charger ? "SET" : "NULL", g_app.bms ? "SET" : "NULL");
+        uint32_t bmsAge = (snap.lastBMS > 0) ? (now - snap.lastBMS) : 99999u;
+        if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "SVC_HEARTBEAT",
+            "V=%.1fV I=%.1fA SOC=%.1f%% | BmsAge=%lums Plug=%d BmsSafe=%d ChgReady=%d Fault=%d Tx=%d",
+            snap.terminalVolt, snap.terminalCurr, snap.socPercent, bmsAge,
+            (int)(snap.gunPhysicallyConnected || snap.batteryConnected),
+            (int)snap.bmsSafeToCharge,
+            (g_app.charger ? (int)g_app.charger->isReady() : -1),
+            (int)snap.faultLockActive,
+            (int)snap.transactionActive);
     }
 
     // 1. Tick HAL Drivers to process incoming CAN strings
@@ -24,7 +38,6 @@ void ChargerService::poll() {
     if (g_app.bms)     g_app.bms->update();
 
     // 1.5 Push System flags to BMS driver for heartbeat
-    auto snap = SystemState::instance().snapshot();
     if (g_app.bms) {
         uint8_t flags = 0;
         // Bit 0 = Hardware failure: module is offline only if it isn't online AND isn't actively
@@ -41,6 +54,7 @@ void ChargerService::poll() {
     if (g_app.bms && g_app.bms->isConnected()) {
         auto& state = SystemState::instance();
         state.setBatteryConnected(true);
+        state.setGunPhysicallyConnected(true); // BMS CAN frames = physical gun proof
         state.setBMS_Vmax(g_app.bms->getPackVoltage());
         state.setBMS_Imax(g_app.bms->getMaxChargeCurrent());
         state.setSocPercent(g_app.bms->getSoc());
@@ -50,18 +64,16 @@ void ChargerService::poll() {
 
         // Dynamically update charger limits if charging is actively running
         if (state.getTransactionActive() && g_app.charger) {
-            static float lastSentImax = -1.0f;
-            static float lastSentVmax = -1.0f;
             float newVmax = state.getBMS_Vmax();
             float newImax = state.getBMS_Imax();
 
-            if (newVmax > 10.0f && newImax >= 0.0f && 
-                (abs(newVmax - lastSentVmax) >= 0.1f || abs(newImax - lastSentImax) >= 0.1f)) {
-                
+            if (newVmax > 10.0f && newImax >= 0.0f &&
+                (fabsf(newVmax - _lastSentVmax) >= 0.1f || fabsf(newImax - _lastSentImax) >= 0.1f)) {
+
                 g_app.charger->updateLimits(newVmax, newImax);
-                lastSentVmax = newVmax;
-                lastSentImax = newImax;
-                
+                _lastSentVmax = newVmax;
+                _lastSentImax = newImax;
+
                 if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "CHARGER_SVC", "Dynamic limit update: Vmax=%.1fV Imax=%.1fA", newVmax, newImax);
             }
         }
@@ -94,9 +106,10 @@ void ChargerService::poll() {
         }
     }
 
-    snap = SystemState::instance().snapshot(); // Update snap
+    snap = SystemState::instance().snapshot(); // Update snap with new BMS/Charger data
     pollPlugDetection(snap);
     pollChargerHealth();
+    pollVehicleInfo(snap);
 }
 
 // Assuming SafetyService::poll() is intended for a different file or class definition.
@@ -112,10 +125,28 @@ void ChargerService::pollPlugDetection(const StateSnapshot& snap) {
 
     bool shouldDisconnect = false;
 
-    // Method 1: BMS timeout (3 seconds)
-    if ((snap.gunPhysicallyConnected || snap.batteryConnected) && (now - snap.lastBMS > 3000)) {
-        if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "PLUG", "Disconnected: BMS timeout (3s)");
-        shouldDisconnect = true;
+    // Method 1: BMS frame timeout
+    // Threshold: 8s (increased from 3s).
+    // Rationale: BMS may pause CAN frames for 2-5s during:
+    //   - Cell balancing at high SOC
+    //   - Internal protection evaluation
+    //   - CAN bus glitch recovery
+    // A 3s timeout was triggering false PLUG_DISCONNECT at 93%+ SOC mid-session.
+    uint32_t bmsAge = (snap.lastBMS > 0) ? (now - snap.lastBMS) : 0;
+    if ((snap.gunPhysicallyConnected || snap.batteryConnected) && bmsAge > 8000) {
+        if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
+            "[BMS_TIMEOUT_8S] lastBMS=%lums ago | V=%.1fV I=%.1fA | BmsConn=%d BmsSafe=%d | Tx=%d Fault=%d",
+            bmsAge, snap.terminalVolt, snap.terminalCurr,
+            (int)snap.batteryConnected, (int)snap.bmsSafeToCharge,
+            (int)snap.transactionActive, (int)snap.faultLockActive);
+        // Additional guard: if terminal voltage is still high (>50V), the charger
+        // is still physically connected — don't flag as disconnected yet.
+        if (snap.terminalVolt < 50.0f) {
+            shouldDisconnect = true;
+        } else {
+            if (g_app.logger) g_app.logger->logf(ILogger::Level::WARN, "PLUG",
+                "BMS silent %lums but V=%.1fV — charger still connected, waiting for BMS recovery", bmsAge, snap.terminalVolt);
+        }
     }
 
     // Method 2: Voltage drop rate (>2V/s)
@@ -127,7 +158,10 @@ void ChargerService::pollPlugDetection(const StateSnapshot& snap) {
             float deltaV = _lastVoltageCheck - snap.terminalVolt;
             float deltaT = (now - _lastVoltageTime) / 1000.0f;
             if (deltaT > 0.5f && (deltaV / deltaT) > 2.0f) {
-                if (g_app.logger) g_app.logger->logf(ILogger::Level::WARN, "PLUG", "Disconnected: Fast voltage drop (%.1fV/s)", deltaV / deltaT);
+                if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
+                    "[VOLT_DROP] %.1fV/s | V=%.1f->%.1f | BmsAge=%lums | Tx=%d Fault=%d",
+                    deltaV / deltaT, _lastVoltageCheck, snap.terminalVolt,
+                    (now - snap.lastBMS), (int)snap.transactionActive, (int)snap.faultLockActive);
                 shouldDisconnect = true;
             }
         }
@@ -144,8 +178,13 @@ void ChargerService::pollPlugDetection(const StateSnapshot& snap) {
         if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "PLUG", "Status: DISCONNECTED");
 
         if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
-            if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "PLUG", "Stopping transaction (txId=%d)",
-                                                 SystemState::instance().getActiveTransactionId());
+            if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
+                "[PLUG_DISCONNECT] calling endTransaction EVDisconnected | txId=%d V=%.1fV I=%.1fA BmsAge=%lums BmsSafe=%d ChgReady=%d",
+                SystemState::instance().getActiveTransactionId(),
+                snap.terminalVolt, snap.terminalCurr,
+                (snap.lastBMS > 0 ? now - snap.lastBMS : 99999u),
+                (int)snap.bmsSafeToCharge,
+                (g_app.charger ? (int)g_app.charger->isReady() : -1));
             ocpp::endTransactionSafe(nullptr, "EVDisconnected");
         }
     }
@@ -186,6 +225,11 @@ void ChargerService::pollChargerHealth() {
             if (g_app.logger) g_app.logger->log(ILogger::Level::ERROR, "CHARGER_SVC", "DRV_DEBUG: g_app.charger is NULL!");
         }
     }
+}
+
+void ChargerService::pollVehicleInfo(const StateSnapshot& snap) {
+    // Moved to OcppService::poll() for state-based triggers 
+    // (Preparing, Charging, Finishing) to avoid mid-charge spam.
 }
 
 } // namespace prod

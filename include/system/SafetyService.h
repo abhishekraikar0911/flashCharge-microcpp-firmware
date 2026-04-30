@@ -29,6 +29,7 @@ private:
     void pollEStop();
     void pollSafetyLimits(const StateSnapshot& snap);
     void pollFaultLock(const StateSnapshot& snap);
+    void pollButtons();  // Physical START / STOP buttons
 
     unsigned long _lastSafetyCheck   = 0;
     unsigned long _lastBmsSafetyCheck = 0;
@@ -39,6 +40,19 @@ private:
     bool _tempCriticalActive       = false;
     bool _voltageAlertActive       = false;
     bool _lastBmsSafe              = true;
+    bool _bmsTimeoutHandled        = false; // Prevents repeated endTransactionSafe on timeout
+
+    // E-Stop debounce: prevent contact bounce from mis-triggering
+    unsigned long _estopRisingTime  = 0; // When pin first went HIGH (pressed)
+    unsigned long _estopFallingTime = 0; // When pin first went LOW (released)
+
+    // Start button debounce
+    unsigned long _startBtnRisingTime  = 0;
+    bool          _startBtnActive      = false;
+
+    // Stop button debounce
+    unsigned long _stopBtnRisingTime   = 0;
+    bool          _stopBtnActive       = false;
 };
 
 } // namespace prod

@@ -63,15 +63,15 @@ private:
 
     // TX helpers
     void sendHeartbeat(float terminalVolt, float terminalCurr, uint8_t statusFlags);
-    void sendSocRequest();
+    // Note: sendSocRequest() removed — SOC is now parsed directly from 0x1806E5F4 bytes 5-6
 
     // CAN ID constants — Rivot Motors BMS protocol
-    static const uint32_t BMS_REQUEST_ID  = 0x1806E5F4; // BMS sends charge request → MCU RX
+    // 0x1806E5F4: BMS → MCU charge request (Vmax bytes 0-1, Imax bytes 2-3, Fault byte 4, SOC bytes 5-6)
+    // 0x18FF50E5: MCU → BMS charger status heartbeat (TX every 500ms)
+    static const uint32_t BMS_REQUEST_ID  = 0x1806E5F4; // BMS → MCU: charge request + SOC
     static const uint32_t HEARTBEAT_TX_ID = 0x18FF50E5; // MCU → BMS: charger feedback
-    static const uint32_t SOC_REQUEST_ID  = 0x18900140; // MCU → BMS: SOC poll
-    static const uint32_t SOC_RESPONSE_ID = 0x18904001; // BMS → MCU: SOC reply
     static const uint32_t TIMEOUT_MS      = 3000;
 
     uint32_t lastTxTimeMs;
-    static const uint32_t TX_INTERVAL_MS = 1000; // Send heartbeat + SOC request every 1s
+    static const uint32_t TX_INTERVAL_MS = 500;  // Send heartbeat + SOC request every 500ms
 };
