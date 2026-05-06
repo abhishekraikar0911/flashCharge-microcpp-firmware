@@ -8,10 +8,16 @@
 #include <MicroOcpp.h>
 // HAL v1: AppContext for new driver interfaces
 #include "app/AppContext.h"
+#include "system/GsmManager.h"    // g_gsmManager — used in stop reason diagnostic
+#include <cstring>                  // strcmp — used in stop reason diagnostic
 
 namespace prod {
 
 OcppTransactionManager g_transactionManager;
+
+// ═══════════════════════════════════════════════════════════════
+// (Post-tx cooldown removed — Finishing state is handled by library)
+// ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
 // Standalone plug detection with 1-second debounce
@@ -44,9 +50,36 @@ void OcppTransactionManager::begin() {
 
 void OcppTransactionManager::registerConnectorInputs() {
     // 1. Plug Detection (Available -> Preparing)
-    // PHASE 3: Uses standalone debounce instead of g_ocppStateMachine
+    // READINESS GATE: Only report "plugged" to MicroOcpp when BOTH conditions are met:
+    //   a) Gun is physically detected (CAN data flowing, BMS responding)
+    //   b) Terminal voltage >= 50V (vehicle discharge/battery switch is ON)
+    // If voltage is < 50V (discharge switch OFF), the connector stays "Available" on the
+    // CSMS dashboard, preventing operators from attempting a doomed RemoteStart.
     setConnectorPluggedInput([]() {
-        return isVehiclePlugged();
+        static bool voltGateOpen = false;
+
+        // If the gun is physically unplugged (BMS timeout), reset everything.
+        if (!isVehiclePlugged()) {
+            voltGateOpen = false;
+            return false;
+        }
+        
+        // Once the gate is open, STAY open until physically unplugged!
+        // This completely eliminates noise or voltage dips from causing
+        // the state to flap between Available and Preparing.
+        if (voltGateOpen) {
+            return true;
+        }
+
+        // If we are here, gun is plugged but gate is closed.
+        // Wait for voltage to cross 50V to open the gate.
+        float termV = SystemState::instance().getTerminalVolt();
+        if (termV > 50.0f) {
+            voltGateOpen = true;
+            return true;
+        }
+        
+        return false;
     });
 
     // 2. EV Ready (Preparing -> Charging if transaction active)
@@ -76,7 +109,7 @@ void OcppTransactionManager::registerConnectorInputs() {
         return nullptr; // no fault
     });
 
-    Serial.println("[OCPP] ✓ Connector inputs registered (Plug, EvReady, EvseReady, PowerSwitchFailure)");
+    Serial.println("[OCPP] ✓ Connector inputs registered (Plug+VoltGate, EvReady, EvseReady, PowerSwitchFailure)");
 }
 
 // PHASE 3: validateRemoteStart() DELETED
@@ -180,10 +213,142 @@ void OcppTransactionManager::handleStopTx(MicroOcpp::Transaction* tx) {
     float durationMin = (start > 0) ? (float)(now - start) / 60000.0f : 0.0f;
     
     auto snap = state.snapshot();
-    Serial.printf("[TX_MGR] 📊 Session Ended: Energy=%.2fWh SOC=%.1f%% Duration=%.1fmin\n", 
-                  snap.energyWh, snap.socPercent, durationMin);
+    const char* moReason = (tx && tx->getStopReason() && tx->getStopReason()[0] != '\0') ? tx->getStopReason() : "None";
+    StopReason sysReasonEnum = state.getStopReason();
+    const char* sysReason = stopReasonStr(sysReasonEnum);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // DETAILED STOP REASON DIAGNOSTIC BLOCK
+    // ─────────────────────────────────────────────────────────────────────
+    Serial.println("\n[TX_MGR] ════════════════════════════════════════════");
+    Serial.println("[TX_MGR]          ⏹️  CHARGING SESSION ENDED");
+    Serial.println("[TX_MGR] ════════════════════════════════════════════");
+    Serial.printf( "[TX_MGR]   TxId    : %d\n", snap.activeTransactionId);
+    Serial.printf( "[TX_MGR]   Energy  : %.2f Wh\n", snap.energyWh);
+    Serial.printf( "[TX_MGR]   SOC     : %.1f %%\n", snap.socPercent);
+    Serial.printf( "[TX_MGR]   Duration: %.1f min\n", durationMin);
+    Serial.printf( "[TX_MGR]   V=%.1fV  I=%.1fA  Temp=%.1f°C\n",
+                   snap.terminalVolt, snap.terminalCurr, snap.chargerTemp);
+    Serial.println("[TX_MGR] ────────────────────────────────────────────");
+    Serial.printf( "[TX_MGR]   HW StopReason  : %s\n", sysReason);
+    Serial.printf( "[TX_MGR]   OCPP StopReason: %s\n", moReason);
+    Serial.println("[TX_MGR] ────────────────────────────────────────────");
+
+    // Decode into human-readable explanation
+    Serial.println("[TX_MGR] 🔍 STOP CAUSE ANALYSIS:");
+
+    // 1. Check server-initiated stops (moReason is what the OCPP library set)
+    if (strcmp(moReason, "Remote") == 0) {
+        Serial.println("[TX_MGR]   ✅ STOPPED BY: CSMS Remote Command");
+        Serial.println("[TX_MGR]   📋 Someone (operator/automation) sent RemoteStopTransaction from the server.");
+        Serial.println("[TX_MGR]   ℹ️  Check CSMS logs for who/what triggered RemoteStop for this TxId.");
+
+    } else if (strcmp(moReason, "DeAuthorized") == 0) {
+        Serial.println("[TX_MGR]   ⚠️  STOPPED BY: CSMS De-Authorization");
+        Serial.println("[TX_MGR]   📋 Server rejected/revoked the ID tag authorization mid-session.");
+        Serial.println("[TX_MGR]   ℹ️  Or StartTransaction.conf never arrived → 140s timeout expired.");
+
+    } else if (strcmp(moReason, "EmergencyStop") == 0) {
+        Serial.println("[TX_MGR]   🚨 STOPPED BY: EMERGENCY STOP");
+        if (sysReasonEnum == StopReason::EMERGENCY_STOP) {
+            Serial.println("[TX_MGR]   📋 Physical E-Stop button (GPIO 32) was pressed by operator.");
+            Serial.println("[TX_MGR]   ℹ️  Relay opened + FaultLock activated. Release button to recover.");
+        } else {
+            Serial.println("[TX_MGR]   📋 Over-temperature critical limit exceeded on charger terminal.");
+            Serial.printf( "[TX_MGR]   ℹ️  Temperature was %.1f°C. Wait for cooling before retry.\n", snap.chargerTemp);
+        }
+
+    } else if (strcmp(moReason, "HardReset") == 0) {
+        Serial.println("[TX_MGR]   🚨 STOPPED BY: CONTACT WELDING FAULT");
+        Serial.println("[TX_MGR]   📋 Relay contact welding detected — voltage did not decay after stop.");
+        Serial.println("[TX_MGR]   ℹ️  Hardware inspection required. Relay contacts may be fused.");
+
+    } else if (strcmp(moReason, "Local") == 0) {
+        // Local can be: STOP button press OR network loss
+        if (sysReasonEnum == StopReason::NETWORK_LOSS) {
+            Serial.println("[TX_MGR]   🌐 STOPPED BY: NETWORK LOSS");
+            Serial.println("[TX_MGR]   📋 GSM/WiFi disconnected during session beyond COMM_LOSS_TIMEOUT.");
+            Serial.printf( "[TX_MGR]   ℹ️  GSM=%d WS=%d. Check SIM card / signal. CSQ was likely low.\n",
+                           (int)g_gsmManager.isConnected(), (int)ocpp::isConnected());
+        } else {
+            Serial.println("[TX_MGR]   🟢 STOPPED BY: Local STOP button (GPIO 26)");
+            Serial.println("[TX_MGR]   📋 Operator pressed the physical STOP button on the charger.");
+        }
+
+    } else if (strcmp(moReason, "Other") == 0) {
+        // 'Other' covers BMS stops, CAN timeout, network loss, overtemp
+        if (sysReasonEnum == StopReason::BMS_FULL_CHARGE) {
+            Serial.println("[TX_MGR]   ✅ STOPPED BY: CHARGE COMPLETE — BATTERY FULL");
+            Serial.println("[TX_MGR]   📋 BMS byte5=0x01 fired at SOC=100%. This is a normal end-of-session.");
+            Serial.printf( "[TX_MGR]   ℹ️  Energy delivered=%.2fWh | Duration=%.1fmin | V=%.1fV\n",
+                           snap.energyWh, durationMin, snap.terminalVolt);
+            Serial.println("[TX_MGR]   ℹ️  No fault. Vehicle is ready for use.");
+
+        } else if (sysReasonEnum == StopReason::BMS_SWITCH_OFF) {
+            Serial.println("[TX_MGR]   ⚠️  STOPPED BY: BMS CHARGER MOSFET TRIPPED (PROTECTION FAULT)");
+            Serial.println("[TX_MGR]   📋 BMS byte5=0x01 fired but SOC was NOT 100% — this is a fault stop.");
+            Serial.printf( "[TX_MGR]   ℹ️  SOC at stop=%.1f%%. Possible causes:\n", snap.socPercent);
+            Serial.println("[TX_MGR]      - Single cell overvoltage / cell imbalance");
+            Serial.println("[TX_MGR]      - BMS internal overtemperature");
+            Serial.println("[TX_MGR]      - BMS overcurrent protection");
+            Serial.println("[TX_MGR]      - BMS internal fault (check vehicle BMS diagnostic)");
+            Serial.println("[TX_MGR]   ℹ️  FaultLock active — check LED. Will clear after stabilization.");
+
+        } else if (sysReasonEnum == StopReason::BMS_TIMEOUT) {
+            Serial.println("[TX_MGR]   📡 STOPPED BY: BMS CAN COMMUNICATION TIMEOUT");
+            Serial.printf( "[TX_MGR]   📋 No CAN frames received from vehicle BMS for >10 seconds.");
+            Serial.printf( "[TX_MGR]   ℹ️  BmsAge=%lums at stop. Check CAN2 (MCP2515) wiring & BMS power.\n",
+                           (now - snap.lastBMS));
+        } else if (sysReasonEnum == StopReason::CAN_TIMEOUT) {
+            Serial.println("[TX_MGR]   ⚡ STOPPED BY: CHARGER MODULE CAN TIMEOUT (CAN1/TWAI)");
+            Serial.println("[TX_MGR]   📋 Charger power module stopped sending telemetry for >10 seconds.");
+            Serial.println("[TX_MGR]   ℹ️  Check CAN1 (ISO1050/TWAI) wiring to charger module. Module may have faulted.");
+        } else if (sysReasonEnum == StopReason::OVERTEMP) {
+            Serial.println("[TX_MGR]   🌡️  STOPPED BY: OVER-TEMPERATURE (CRITICAL LIMIT)");
+            Serial.printf( "[TX_MGR]   📋 Charger terminal temp %.1f°C exceeded ALERT_TEMP_CRITICAL_C.\n", snap.chargerTemp);
+            Serial.println("[TX_MGR]   ℹ️  Allow cooling. Check fan/ventilation. FaultLock active.");
+        } else if (sysReasonEnum == StopReason::NETWORK_LOSS) {
+            Serial.println("[TX_MGR]   🌐 STOPPED BY: NETWORK LOSS");
+            Serial.println("[TX_MGR]   📋 GSM/WiFi disconnected during session beyond COMM_LOSS_TIMEOUT.");
+            Serial.printf( "[TX_MGR]   ℹ️  GSM=%d WS=%d. Check SIM card / signal.\n",
+                           (int)g_gsmManager.isConnected(), (int)ocpp::isConnected());
+        } else {
+            Serial.println("[TX_MGR]   ❓ STOPPED BY: UNKNOWN HARDWARE FAULT");
+            Serial.printf( "[TX_MGR]   📋 moReason='Other' but sysReason='%s'. Manual investigation required.\n", sysReason);
+        }
+
+    } else if (strcmp(moReason, "EVDisconnected") == 0) {
+        Serial.println("[TX_MGR]   🔌 STOPPED BY: EV DISCONNECTED");
+        Serial.println("[TX_MGR]   📋 MicroOcpp detected pluggedInput()=false while transaction was active.");
+        Serial.println("[TX_MGR]   ℹ️  Gun was physically unplugged OR BmsAge>timeout (CAN silent = 'gun gone').");
+
+    } else if (strcmp(moReason, "None") == 0 && sysReasonEnum == StopReason::POWER_RESTART) {
+        Serial.println("[TX_MGR]   🔄 STOPPED BY: ESP32 RESTART / CRASH");
+        Serial.println("[TX_MGR]   📋 The ESP32 rebooted mid-session (power cut, watchdog, or panic crash).");
+        Serial.println("[TX_MGR]   ℹ️  Check [System] Reset reason at top of boot log:");
+        Serial.println("[TX_MGR]      ESP_RST_PANIC    → firmware crash (stack overflow / null deref)");
+        Serial.println("[TX_MGR]      ESP_RST_TASK_WDT → task blocked >30s (deadlock / infinite loop)");
+        Serial.println("[TX_MGR]      ESP_RST_BROWNOUT → power supply sag under load (check PSU)");
+        Serial.println("[TX_MGR]      ESP_RST_SW       → deliberate esp_restart() from firmware");
+
+    } else {
+        // Catch-all for any unrecognized combination
+        Serial.printf( "[TX_MGR]   ❓ STOPPED BY: UNCLASSIFIED (moReason='%s' sysReason='%s')\n", moReason, sysReason);
+        Serial.println("[TX_MGR]   📋 Review serial log above for [STOP_TRIGGER] or [SAFETY] entries.");
+    }
+
+    Serial.println("[TX_MGR] ════════════════════════════════════════════\n");
+    // ─────────────────────────────────────────────────────────────────────
     
-    ocpp::sendSessionSummary(snap.socPercent, snap.energyWh, durationMin);
+    ocpp::sendSessionSummary(
+        snap.socPercent,
+        snap.energyWh,
+        durationMin,
+        snap.activeTransactionId,   // txId — same value shown in serial [SYS] log
+        sysReason,                  // hardware stop reason, e.g. "BMS Charger Switch OFF"
+        snap.terminalVolt,          // last known terminal voltage at stop
+        snap.terminalCurr           // last known terminal current at stop
+    );
 
     // Clear state
     state.setActiveTransactionId(-1);
@@ -204,6 +369,7 @@ void OcppTransactionManager::handleStopTx(MicroOcpp::Transaction* tx) {
     // The library manages the Charging→Finishing→Available transition internally.
     g_healthMonitor.onTransactionEnded();
     
+    // Let MicroOcpp handle the Charging -> Finishing -> Available transition naturally
     Serial.println("[TX_MGR] ⏹️  Transaction stopped - all flags cleared (stopTxPending=ON)");
 }
 
@@ -234,6 +400,18 @@ void OcppTransactionManager::startLocalTransaction(const char* idTag) {
     }
     if (!SystemState::instance().getBmsSafeToCharge()) {
         Serial.println("[TX_MGR] ⚠️ Cannot start: BMS Charger Switch is OFF (flag 0x01). Turn ON the vehicle charging switch.");
+        return;
+    }
+
+    // VEHICLE DISCHARGE SWITCH CHECK:
+    // Terminal voltage below 50V means the vehicle's discharge/battery contactor is open.
+    // This happens when the vehicle's discharge switch is OFF even if the gun is connected.
+    // Attempting to charge in this state causes a false OCPP "Faulted" state because the
+    // charger output voltage cannot rise to meet the battery. Block start and inform the user.
+    float termV = SystemState::instance().getTerminalVolt();
+    if (termV < 50.0f) {
+        Serial.printf("[TX_MGR] ⚠️ Cannot start: Terminal voltage too low (%.1fV < 50V).\n", termV);
+        Serial.println("[TX_MGR] ⚠️ Vehicle discharge/battery switch appears to be OFF. Turn it ON before charging.");
         return;
     }
 

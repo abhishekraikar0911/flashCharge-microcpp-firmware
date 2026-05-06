@@ -53,6 +53,16 @@ private:
     // Stop button debounce
     unsigned long _stopBtnRisingTime   = 0;
     bool          _stopBtnActive       = false;
+
+    // Contact Welding Detection
+    bool          _lastChargingState    = false;
+    unsigned long _weldCheckStartTime   = 0;
+    bool          _weldCheckActive      = false;
+    int           _weldCheckStep        = 0;
+    float         _decayVoltages[4]     = {0.0f};
+    const float   MIN_DROP_THRESHOLD    = 3.0f; // 3.0V drop required over 15 seconds
+
+    void pollContactWelding(const StateSnapshot& snap);
 };
 
 } // namespace prod

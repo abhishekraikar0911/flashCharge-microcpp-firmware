@@ -89,22 +89,24 @@ namespace prod
         // IST offset = 19800s (5h30m), no DST
         configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
         
-        // Wait for valid time (max 10 seconds)
+        // Threshold: 1735689600 = Jan 1, 2026.
+        // Any time value below this means the ESP32 clock is at epoch 0 or stale
+        // and MbedTLS will reject the server certificate's validity window.
         unsigned long ntpStart = millis();
         time_t now = time(nullptr);
-        while (now < 1000000000L && millis() - ntpStart < 10000) {
+        while (now < 1735689600L && millis() - ntpStart < 10000) {
             delay(250);
             now = time(nullptr);
         }
         
-        if (now > 1000000000L) {
+        if (now > 1735689600L) {
             struct tm timeinfo;
             localtime_r(&now, &timeinfo);
             char timeStr[64];
             strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S IST", &timeinfo);
             Serial.printf("[NTP] ✅ Time synced: %s\n", timeStr);
         } else {
-            Serial.println("[NTP] ⚠️  Time sync failed — TLS may reject certificates!");
+            Serial.println("[NTP] ⚠️  Time sync failed — TLS will reject certificates!");
         }
     }
 

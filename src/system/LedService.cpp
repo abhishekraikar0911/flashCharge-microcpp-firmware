@@ -2,6 +2,7 @@
 #include "app/AppContext.h"
 #include "config/hardware.h"
 #include "system/NetworkManager.h"
+#include "system/SystemState.h"
 #include <MicroOcpp.h>
 
 namespace prod {
@@ -36,7 +37,10 @@ void LedService::poll() {
     }
 
     // Charger LED (D13): Blink = Charging, Steady ON = Ready, OFF = Faulted
-    ChargePointStatus libStatus = getChargePointStatus(1);
+    ChargePointStatus libStatus = ChargePointStatus_Available;
+    if (SystemState::instance().getOcppInitialized()) {
+        libStatus = getChargePointStatus(1);
+    }
 
     if (libStatus == ChargePointStatus_Charging) {
         if (blinkToggle) g_app.gpio->write(LED_CHARGER_STATUS, _chargerLedState);

@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <time.h>             // time(), localtime_r(), strftime(), struct tm — required for NTP validation
 #include <MicroOcpp.h>
 // HAL v1: AppContext for new driver interfaces
 #include "app/AppContext.h"
@@ -9,10 +10,10 @@
 #include <MicroOcpp/Model/Transactions/Transaction.h>
 #include "config/hardware.h"
 #include "system/SafeSerial.h"
+#include "system/HealthMonitor.h" // g_healthMonitor.feed() — required inside NTP wait loop
 
 #include "services/OcppClient.h"
 #include "config/production_config.h"
-#include "config/secrets.h"
 #include "config/secure_config.h"
 #include "system/OtaManager.h"
 // PHASE 4: Removed #include "ocpp_state_machine.h" — library manages state internally
@@ -27,6 +28,7 @@
 #include "services/TransactionService.h"
 #include "services/MeterService.h"
 #include "system/SystemState.h"
+#include <Preferences.h>
 
 // All state now accessed through SystemState::instance()
 
@@ -187,9 +189,8 @@ bool ocpp::init()
     else
     {
         Serial.println("[OCPP] ❌ Failed to load OCPP config from secure storage!");
-        Serial.println("[OCPP] ⚠️  Using fallback macros (may be SECURE_STORAGE placeholder)");
-        // Fallback to macros - will be SECURE_STORAGE placeholder if not migrated
-        g_ocppConnection.setServer(SECRET_CSMS_HOST, SECRET_CSMS_PORT, SECRET_CHARGER_ID);
+        Serial.println("[OCPP] ⚠️  Device requires provisioning. Run SecureConfig::migrateFromLegacySecrets().");
+        return false;
     }
 
     // Require network (GSM or WiFi) before initializing
@@ -200,6 +201,36 @@ bool ocpp::init()
     }
     Serial.printf("[OCPP] ✅ Network connected via %s\n",
                   prod::connectionTypeToString(prod::g_networkManager.getActiveConnection()));
+
+    // ── STRICT TLS REQUIREMENT: Wait for NTP Time Sync ──
+    Serial.println("[OCPP] ⏳ Waiting for system time sync (required for TLS cert validation)...");
+    uint32_t ntpWaitStart = millis();
+    bool timeValid = false;
+    
+    // Non-blocking wait loop for NTP sync (up to 30 seconds)
+    while (millis() - ntpWaitStart < 30000) {
+        time_t now = time(nullptr);
+        // Threshold: 1735689600 = Jan 1, 2026.
+        // Any time value below this means NTP has NOT synced (clock is at epoch 0 or stale).
+        if (now > 1735689600L) {
+            timeValid = true;
+            struct tm timeinfo;
+            localtime_r(&now, &timeinfo);
+            char timeStr[64];
+            strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+            Serial.printf("[OCPP] ✅ System time synced: %s\n", timeStr);
+            break;
+        }
+        g_healthMonitor.feed();         // Feed watchdog to prevent task crash
+        vTaskDelay(pdMS_TO_TICKS(250)); // Yield to RTOS scheduler
+    }
+
+    if (!timeValid) {
+        Serial.println("[OCPP] ❌ FATAL: NTP time sync failed!");
+        Serial.println("[OCPP] ⚠️  TLS certificate validation requires accurate system time.");
+        Serial.println("[OCPP] 🔄 Aborting OCPP init. Will retry in next poll cycle.");
+        return false; // Safely abort and let the state machine retry
+    }
 
     // Test network connectivity to server BEFORE initializing WebSocket
     // NOTE: WiFiClientSecure uses WiFi DNS — skip when connected via GSM
@@ -239,14 +270,10 @@ bool ocpp::init()
             Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
             return false;
         }
-        // NOTE: Pass nullptr for CA cert so WebSocket uses setInsecure() fallback.
-        // The ISRG Root X1 cert caused -8576 (X509 invalid format) errors in MbedTLS
-        // when NTP time is synced. The direct test connection above still validates 
-        // the cert for diagnostics. For production, enable proper cert pinning via
-        // the security_manager once the cert chain is fully verified.
+        
         // Use the UnifiedConnection which handles GSM/WiFi and the idle watchdog.
         // It wraps the standard WebSocketsClient for WiFi and uses a custom
-        // transport for GSM.
+        // transport for GSM. Both enforce strict TLS using ISRG_ROOT_X1_CERT.
         mocpp_initialize(
             g_ocppConnection,
             ChargerCredentials(DEFAULT_CHARGER_MODEL, DEFAULT_CHARGER_VENDOR),
@@ -507,9 +534,40 @@ void ocpp::poll()
     auto& state = SystemState::instance();
 
     // ═══════════════════════════════════════════════════════════════
+    // RECONNECT DETECTION: Force StatusNotification re-send after WS reconnect.
+    //
+    // Root cause of "Firmware=Preparing, Server=Available" bug:
+    //   1. Vehicle plugged in → firmware enters Preparing.
+    //   2. WebSocket idle watchdog fires → WS torn down and reconnected.
+    //   3. CSMS drops all charger state and assumes "Available".
+    //   4. MicroOcpp never re-sends StatusNotification(Preparing) because the
+    //      firmware state never changed — it only sends on state *transitions*.
+    //
+    // Fix: Detect the WS reconnection edge (false→true). On reconnect, reset
+    // lastReportedStatus to -1 so the block below sees a "state change" and
+    // forces MicroOcpp to re-queue StatusNotification with the current state.
+    // ═══════════════════════════════════════════════════════════════
+    // Declared here (before reconnect block) so it can be reset on reconnect.
+    static int lastReportedStatus = -1;
+
+    {
+        static bool lastWsConnected = false;
+        bool wsNowConnected = false;
+        {
+            OcppLock lock;
+            if (lock.ok()) wsNowConnected = isOperative();
+        }
+        if (!lastWsConnected && wsNowConnected) {
+            // Rising edge: WS just reconnected. Force status re-announcement.
+            Serial.println("[OCPP] ✅ WebSocket reconnected — forcing StatusNotification re-sync with CSMS");
+            lastReportedStatus = -1;
+        }
+        lastWsConnected = wsNowConnected;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // DIAGNOSTICS & HEALTH (EVERY 5S/10S)
     // ═══════════════════════════════════════════════════════════════
-    static int lastReportedStatus = -1;
     int currentStatus = (int)getChargePointStatus(1);
     
     if (currentStatus != lastReportedStatus && currentStatus > 0) {
@@ -541,7 +599,21 @@ void ocpp::poll()
                 // Range = (Capacity * SOC) * 2.7 km/Ah
                 float estimatedRange = capacityAh * (snap.socPercent / 100.0f) * 2.7f;
 
-                ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, "ME9NP1411H2172005");
+                // Get VIN dynamically from NVS or fallback to default
+                Preferences prefs;
+                String vinStr = "ME9NP1411H2172005"; // Default
+                // Open in read/write mode (false) so it creates the namespace silently if NOT_FOUND
+                if (prefs.begin("config", false)) {
+                    // Check if key exists first to avoid the verbose ESP32 error log:
+                    // "[E][Preferences.cpp:483] getString(): nvs_get_str len fail: vin NOT_FOUND"
+                    if (prefs.isKey("vin")) {
+                        String stored = prefs.getString("vin", "");
+                        if (stored.length() > 0) vinStr = stored;
+                    }
+                    prefs.end();
+                }
+
+                ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, vinStr.c_str());
             }
         }
     }
@@ -598,19 +670,34 @@ void ocpp::poll()
                     // Reset handshake guard so it doesn't artificially block this
                     // sendVehicleInfo handles handshakeGuardStart internally but it won't be blocked here
                     // because activeTransactionId is now > 0.
-                    ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, "ME9NP1411H2172005");
+                    // Get VIN dynamically from NVS or fallback to default
+                    Preferences prefs;
+                    String vinStr = "ME9NP1411H2172005"; // Default
+                    // Open in read/write mode (false) so it creates the namespace silently if NOT_FOUND
+                    if (prefs.begin("config", false)) {
+                        if (prefs.isKey("vin")) {
+                            String stored = prefs.getString("vin", "");
+                            if (stored.length() > 0) vinStr = stored;
+                        }
+                        prefs.end();
+                    }
+
+                    ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, vinStr.c_str());
                 }
             }
         }
 
-        SafeSerial::printf("[SYS] @%lums | Status=%s | Tx=%s | TxId=%d | Chg=%s | Healthy=%s | Op=%d\n",
+        // Single merged STATUS line: replaces separate [SYS] + [NET] + [CON] logs
+        SafeSerial::printf("[SYS] @%lums | %s | Tx=%s TxId=%d | Chg=%s | Healthy=%s | GSM=%d WS=%d CSQ=%d\n",
                      millis(),
                      ocppStatusToString(getChargePointStatus(1)),
                      snap.transactionActive ? "Active" : "Idle",
                      snap.activeTransactionId,
                      snap.chargingEnabled ? "ON" : "OFF",
                      healthy ? "YES" : "NO",
-                     isOperative());
+                     (int)g_gsmManager.isConnected(),
+                     (int)ocpp::isConnected(),
+                     g_gsmManager.getSignalQuality());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -653,13 +740,20 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
         return;
     }
     if (!isOperative()) {
+        Serial.println("[OCPP] ⚠️  Skip VehicleInfo: Charger is not operative (Offline or Faulted)");
         return;
     }
 
     // RATE-LIMIT: Don't queue if previous VehicleInfo hasn't received a response yet
+    static unsigned long pendingSince = 0;
     if (vehicleInfoPending) {
-        Serial.println("[OCPP] ⏳ VehicleInfo skipped — previous still pending in queue");
-        return;
+        if (millis() - pendingSince < 30000) {
+            Serial.println("[OCPP] ⏳ VehicleInfo skipped — previous still pending in queue");
+            return;
+        } else {
+            Serial.println("[OCPP] ⚠️  VehicleInfo pending lock timed out! Forcing clear.");
+            vehicleInfoPending = false;
+        }
     }
 
     // HANDSHAKE GUARD: Suppress DataTransfer during the StartTx handshake window.
@@ -699,18 +793,14 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
         return;
     }
 
-    // VehicleInfo logging
-    const char* stateLabel = "Unknown";
-    int st = (int)getChargePointStatus(1);
-    if (st == 1) stateLabel = "Preparing";
-    else if (st == 2) stateLabel = "Charging";
-    else if (st == 5) stateLabel = "Finishing";
-    else stateLabel = "Idle";
+    // VehicleInfo state label — shows current OCPP state correctly
+    const char* stateLabel = ocppStatusToString(getChargePointStatus(1));
 
     Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (%s):\n", stateLabel);
     Serial.printf("  SOC=%.1f%% | Model=%s | Range=%.1fkm | MaxI=%.1fA | VIN=%s\n", soc, modelName, range, maxCurrent, vin);
 
     vehicleInfoPending = true;  // Mark as pending BEFORE queuing
+    pendingSince = millis();
 
     sendRequest("DataTransfer",
         [soc, maxCurrent, model, range, modelName, vin]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
@@ -738,7 +828,9 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     );
 }
 
-void ocpp::sendSessionSummary(float finalSoc, double energyDelivered, float duration)
+void ocpp::sendSessionSummary(float finalSoc, double energyDelivered, float duration,
+                               int txId, const char* stopReason,
+                               float terminalVolt, float terminalCurr)
 {
     OcppLock lock;
     if (!lock.ok())
@@ -746,35 +838,46 @@ void ocpp::sendSessionSummary(float finalSoc, double energyDelivered, float dura
         return;
     }
     if (!isOperative()) {
+        Serial.println("[OCPP] ⚠️  Skip SessionSummary: not operative (offline). Will be lost.");
         return;
     }
 
-    // [DISABLED] SessionSummary logging - removed for cleaner console
-    // Serial.printf("\n[OCPP] 📊 Sending SessionSummary:\n");
-    // Serial.printf("  FinalSOC=%.1f%% | Energy=%.2fWh | Duration=%.1fmin\n\n", 
-    //               finalSoc, energyDelivered, duration);
+    Serial.printf("\n[OCPP] 📤 Sending SessionSummary to CSMS:\n");
+    Serial.printf("  TxId=%d | StopReason=%s\n", txId, stopReason);
+    Serial.printf("  FinalSOC=%.1f%% | Energy=%.2fWh | Duration=%.1fmin\n", finalSoc, energyDelivered, duration);
+    Serial.printf("  Terminal: V=%.1fV I=%.1fA\n\n", terminalVolt, terminalCurr);
+
+    // Capture by value so lambda outlives this stack frame
+    String stopReasonStr(stopReason);
 
     sendRequest("DataTransfer",
-        [finalSoc, energyDelivered, duration]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
-            MicroOcpp::JsonDoc dataDoc(256);
+        [finalSoc, energyDelivered, duration, txId, stopReasonStr, terminalVolt, terminalCurr]()
+            -> std::unique_ptr<MicroOcpp::JsonDoc>
+        {
+            // Inner data object (matches serial log format exactly)
+            MicroOcpp::JsonDoc dataDoc(384);
             JsonObject dataObj = dataDoc.to<JsonObject>();
-            dataObj["finalSoc"] = finalSoc;
-            dataObj["energyDelivered"] = energyDelivered;
-            dataObj["durationMinutes"] = duration;
-            
+            dataObj["txId"]              = txId;
+            dataObj["stopReason"]        = stopReasonStr.c_str();
+            dataObj["finalSoc"]          = finalSoc;
+            dataObj["energyDeliveredWh"] = energyDelivered;
+            dataObj["durationMinutes"]   = duration;
+            dataObj["terminalVolt"]      = terminalVolt;
+            dataObj["terminalCurr"]      = terminalCurr;
+
             String dataStr;
             serializeJson(dataObj, dataStr);
-            
-            auto doc = std::unique_ptr<MicroOcpp::JsonDoc>(new MicroOcpp::JsonDoc(512));
+
+            auto doc = std::unique_ptr<MicroOcpp::JsonDoc>(new MicroOcpp::JsonDoc(640));
             JsonObject payload = doc->to<JsonObject>();
-            payload["vendorId"] = "RivotMotors";
-            payload["messageId"] = "SessionSummary";
-            payload["data"] = dataStr;
+            payload["vendorId"]   = "RivotMotors";
+            payload["messageId"]  = "SessionSummary";
+            payload["data"]       = dataStr;
             return doc;
         },
         [](JsonObject response) {
             const char* status = response["status"] | "Unknown";
-            Serial.printf("[OCPP] ✅ SessionSummary response: %s\n\n", status);
+            Serial.printf("[OCPP] ✅ SessionSummary acknowledged by CSMS: %s\n\n", status);
         }
     );
 }

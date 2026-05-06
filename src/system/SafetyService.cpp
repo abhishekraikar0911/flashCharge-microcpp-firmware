@@ -34,6 +34,7 @@ void SafetyService::poll() {
     pollButtons();
     pollSafetyLimits(snap);
     pollFaultLock(snap);
+    pollContactWelding(snap);
 }
 
 void SafetyService::pollEStop() {
@@ -97,12 +98,12 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
     if (now - _lastSafetyCheck < 100) return;
     _lastSafetyCheck = now;
 
-    // BMS Comm Timeout (5s)
-    if (snap.transactionActive && (now - snap.lastBMS > 5000)) {
+    // BMS Comm Timeout (10s)
+    if (snap.transactionActive && (now - snap.lastBMS > 10000)) {
         static unsigned long lastPrint = 0;
         if (now - lastPrint > 2000) {
             if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
-                "[BMS_TIMEOUT_5S] BmsAge=%lums | V=%.1fV I=%.1fA | BmsSafe=%d ChgReady=%d Fault=%d",
+                "[BMS_TIMEOUT_10S] BmsAge=%lums | V=%.1fV I=%.1fA | BmsSafe=%d ChgReady=%d Fault=%d",
                 (now - snap.lastBMS), snap.terminalVolt, snap.terminalCurr,
                 (int)snap.bmsSafeToCharge,
                 (g_app.charger ? (int)g_app.charger->isReady() : -1),
@@ -118,8 +119,11 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
             SystemState::instance().setStopReason(StopReason::BMS_TIMEOUT);
             if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, true); // Fault LED ON
             if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
-                "[BMS_TIMEOUT_5S] >>> endTransaction(Other) fired | txId=%d",
+                "[BMS_TIMEOUT_10S] >>> endTransaction(Other) fired | txId=%d",
                 SystemState::instance().getActiveTransactionId());
+            // Notify CSMS with a descriptive SystemAlert (StopTransaction.reason='Other' is OCPP-mandated)
+            ocpp::sendSystemAlert("BMS_CAN_TIMEOUT",
+                "Vehicle BMS CAN communication lost for >10s during charging", "Critical");
             ocpp::endTransactionSafe(nullptr, "Other");
         }
     } else {
@@ -131,21 +135,53 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
     if (now - _lastBmsSafetyCheck >= 100) {
         if (snap.bmsSafeToCharge != _lastBmsSafe) {
             if (!snap.bmsSafeToCharge) {
-                if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
-                    "[BMS_SWITCH_OFF] bmsSafe=%d->0 | V=%.1fV I=%.1fA | BmsAge=%lums Tx=%d",
-                    (int)_lastBmsSafe, snap.terminalVolt, snap.terminalCurr,
-                    (snap.lastBMS > 0 ? now - snap.lastBMS : 99999u),
-                    (int)snap.transactionActive);
-                if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
-                    SystemState::instance().setFaultLockActive(true);
-                    SystemState::instance().setFaultLockTime(now);
-                    SystemState::instance().setStopReason(StopReason::BMS_SWITCH_OFF);
-                    if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, true); // Fault LED ON
+                // ── Byte 5 of 0x1806E5F4 just went to 0x01 (charger switch OFF) ──
+                // Disambiguate: SOC==100% is normal charge completion.
+                // SOC<100% is a BMS protection trip (cell fault, overtemp, imbalance, etc.)
+                bool chargeComplete = (snap.socPercent >= 100.0f);
+
+                if (chargeComplete) {
+                    // ── PATH A: Normal full charge ──────────────────────────────
+                    if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "STOP_TRIGGER",
+                        "[BMS_FULL_CHARGE] SOC=%.1f%% | V=%.1fV | BmsAge=%lums | Tx=%d",
+                        snap.socPercent, snap.terminalVolt,
+                        (snap.lastBMS > 0 ? now - snap.lastBMS : 99999u),
+                        (int)snap.transactionActive);
+
+                    if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
+                        SystemState::instance().setStopReason(StopReason::BMS_FULL_CHARGE);
+                        // No FaultLock — this is a clean, expected stop
+                        if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "STOP_TRIGGER",
+                            "[BMS_FULL_CHARGE] >>> endTransaction(Other) fired | txId=%d",
+                            SystemState::instance().getActiveTransactionId());
+                        ocpp::sendSystemAlert("CHARGE_COMPLETE",
+                            "Battery fully charged (SOC=100%). BMS stopped charging normally.", "Info");
+                        ocpp::endTransactionSafe(nullptr, "Other");
+                    }
+
+                } else {
+                    // ── PATH B: BMS protection / MOSFET fault ────────────────────
                     if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
-                        "[BMS_SWITCH_OFF] >>> endTransaction(Other) fired | txId=%d",
-                        SystemState::instance().getActiveTransactionId());
-                    ocpp::endTransactionSafe(nullptr, "Other");
+                        "[BMS_SWITCH_OFF] bmsSafe=%d->0 | SOC=%.1f%% V=%.1fV I=%.1fA | BmsAge=%lums Tx=%d",
+                        (int)_lastBmsSafe, snap.socPercent,
+                        snap.terminalVolt, snap.terminalCurr,
+                        (snap.lastBMS > 0 ? now - snap.lastBMS : 99999u),
+                        (int)snap.transactionActive);
+
+                    if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
+                        SystemState::instance().setFaultLockActive(true);
+                        SystemState::instance().setFaultLockTime(now);
+                        SystemState::instance().setStopReason(StopReason::BMS_SWITCH_OFF);
+                        if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, true); // Fault LED ON
+                        if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
+                            "[BMS_SWITCH_OFF] >>> endTransaction(Other) fired | txId=%d",
+                            SystemState::instance().getActiveTransactionId());
+                        ocpp::sendSystemAlert("BMS_CHARGER_SWITCH_OFF",
+                            "BMS charger MOSFET tripped (SOC<100%) — possible cell fault or protection", "Warning");
+                        ocpp::endTransactionSafe(nullptr, "Other");
+                    }
                 }
+
             } else {
                 if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "SAFETY", "BMS charging enabled");
             }
@@ -173,6 +209,11 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
             SystemState::instance().setFaultLockActive(true);
             SystemState::instance().setFaultLockTime(now);
             SystemState::instance().setStopReason(StopReason::OVERTEMP);
+            // Alert CSMS with temperature value before stopping
+            char tempMsg[64];
+            snprintf(tempMsg, sizeof(tempMsg),
+                "Charger terminal temperature critical: %.1f C", snap.chargerTemp);
+            ocpp::sendSystemAlert("OVER_TEMPERATURE", tempMsg, "Critical");
             ocpp::endTransactionSafe(nullptr, "EmergencyStop");
         }
         _tempCriticalActive = true;
@@ -230,6 +271,84 @@ void SafetyService::pollButtons() {
     } else {
         _stopBtnRisingTime = 0;
         _stopBtnActive     = false;
+    }
+}
+
+void SafetyService::pollContactWelding(const StateSnapshot& snap) {
+    // Feature temporarily disabled as per user request. 
+    // Remove the early return below to re-enable 15-second decay check.
+    return;
+
+    uint32_t now = g_app.timer ? g_app.timer->millis() : 0;
+
+    // Trigger on FALLING EDGE of chargingEnabled
+    if (_lastChargingState && !snap.chargingEnabled) {
+        _weldCheckActive = true;
+        _weldCheckStartTime = now;
+        _weldCheckStep = 0;
+        _decayVoltages[0] = snap.terminalVolt; // t=0s
+        if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "SAFETY", 
+            "Contact Welding Check STARTED. V0 = %.1fV", _decayVoltages[0]);
+    }
+    _lastChargingState = snap.chargingEnabled;
+
+    if (!_weldCheckActive) return;
+
+    // Sample voltage non-blockingly at t=5s, t=10s, t=15s
+    int elapsedSeconds = (now - _weldCheckStartTime) / 1000;
+    
+    if (elapsedSeconds >= 5 && _weldCheckStep == 0) {
+        _weldCheckStep = 1;
+        _decayVoltages[1] = snap.terminalVolt; // t=5s
+    } 
+    else if (elapsedSeconds >= 10 && _weldCheckStep == 1) {
+        _weldCheckStep = 2;
+        _decayVoltages[2] = snap.terminalVolt; // t=10s
+    }
+    else if (elapsedSeconds >= 15 && _weldCheckStep == 2) {
+        _weldCheckStep = 3;
+        _decayVoltages[3] = snap.terminalVolt; // t=15s
+        
+        _weldCheckActive = false;
+        float v0 = _decayVoltages[0];
+        float v3 = _decayVoltages[3];
+
+        if (g_app.logger) g_app.logger->logf(ILogger::Level::DEBUG, "SAFETY", 
+            "Weld Check FINISHED. V0=%.1fV, V15=%.1fV (Drop: %.1fV)", v0, v3, (v0 - v3));
+
+        // Only check if we started from a reasonably high charging voltage
+        if (v0 > 15.0f) {
+            // Did it drop at least 3.0V over 15 seconds?
+            // If the contactor is welded, it will stay near the battery voltage (drop < 1V)
+            bool sufficientDrop = (v0 - v3) >= MIN_DROP_THRESHOLD;
+
+            if (!sufficientDrop) {
+                if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "SAFETY", 
+                    "🚨 FAULT: CONTACT WELDING DETECTED! Voltage only dropped %.1fV in 15 seconds (Expected >3.0V)", (v0 - v3));
+                
+                // Hardware Safety Action
+                SystemState::instance().setFaultLockActive(true);
+                SystemState::instance().setFaultLockTime(now);
+                SystemState::instance().setStopReason(StopReason::FAULT);
+                
+                if (g_app.charger) g_app.charger->stopCharging();
+                if (g_app.relay)   g_app.relay->open();
+                if (g_app.gpio)    g_app.gpio->write(LED_FAULT_STATUS, true);
+
+                // OCPP Notification
+                ocpp::sendSystemAlert("PowerSwitchFailure", "Contact welding detected: no voltage decay", "Critical");
+                if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
+                    ocpp::endTransactionSafe(nullptr, "HardReset");
+                }
+            } else {
+                if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "SAFETY", 
+                    "Contact Welding Check PASSED. Healthy decay confirmed (Drop: %.1fV).", (v0 - v3));
+            }
+        } else {
+            if (g_app.logger) g_app.logger->log(ILogger::Level::DEBUG, "SAFETY", "Weld Check skipped (V0 < 15V)");
+        }
+    } else if (elapsedSeconds > 20) {
+        _weldCheckActive = false; // Timeout safety catch
     }
 }
 

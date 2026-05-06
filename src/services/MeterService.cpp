@@ -82,7 +82,7 @@ void OcppMeterService::poll() {
     if (auto config = MicroOcpp::getConfigurationPublic("MeterValueSampleInterval")) {
         config->setInt(30);
         if (!_forcedMvIntervalLogged) {
-            Serial.println("[METER_SVC] 📊 OCPP MeterValues locked at 30s (Phase 4-F)");
+            Serial.println("[METER_SVC] 📊 OCPP MeterValues locked at 30s");
             _forcedMvIntervalLogged = true;
         }
     }

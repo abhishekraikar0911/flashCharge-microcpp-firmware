@@ -23,14 +23,29 @@ void ChargerService::poll() {
     if (shouldLog) {
         lastDiagLog = now;
         uint32_t bmsAge = (snap.lastBMS > 0) ? (now - snap.lastBMS) : 99999u;
-        if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "SVC_HEARTBEAT",
-            "V=%.1fV I=%.1fA SOC=%.1f%% | BmsAge=%lums Plug=%d BmsSafe=%d ChgReady=%d Fault=%d Tx=%d",
-            snap.terminalVolt, snap.terminalCurr, snap.socPercent, bmsAge,
-            (int)(snap.gunPhysicallyConnected || snap.batteryConnected),
-            (int)snap.bmsSafeToCharge,
-            (g_app.charger ? (int)g_app.charger->isReady() : -1),
-            (int)snap.faultLockActive,
-            (int)snap.transactionActive);
+        int canOk = (int)(snap.gunPhysicallyConnected || snap.batteryConnected);
+        int dcOk = (int)(snap.terminalVolt >= 50.0f);
+        // During charging, add Energy so the log is self-sufficient (no need for separate TELEM)
+        float displaySoc = canOk ? snap.socPercent : 0.0f;
+        if (snap.transactionActive) {
+            if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "SVC_HEARTBEAT",
+                "V=%.1fV I=%.1fA SOC=%.1f%% Energy=%.2fWh | BmsAge=%lums CanOk=%d DcOk=%d BmsSafe=%d ChgReady=%d Fault=%d Tx=%d",
+                snap.terminalVolt, snap.terminalCurr, displaySoc, snap.energyWh, bmsAge,
+                canOk, dcOk,
+                (int)snap.bmsSafeToCharge,
+                (g_app.charger ? (int)g_app.charger->isReady() : -1),
+                (int)snap.faultLockActive,
+                (int)snap.transactionActive);
+        } else {
+            if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "SVC_HEARTBEAT",
+                "V=%.1fV I=%.1fA SOC=%.1f%% | BmsAge=%lums CanOk=%d DcOk=%d BmsSafe=%d ChgReady=%d Fault=%d Tx=%d",
+                snap.terminalVolt, snap.terminalCurr, displaySoc, bmsAge,
+                canOk, dcOk,
+                (int)snap.bmsSafeToCharge,
+                (g_app.charger ? (int)g_app.charger->isReady() : -1),
+                (int)snap.faultLockActive,
+                (int)snap.transactionActive);
+        }
     }
 
     // 1. Tick HAL Drivers to process incoming CAN strings
@@ -93,16 +108,7 @@ void ChargerService::poll() {
             state.setTerminalVolt(v);
             state.setTerminalCurr(i);
 
-            // Periodically log actual terminal telemetry while charging
-            if (state.getTransactionActive()) {
-                static uint32_t lastTelemLog = 0;
-                if (now - lastTelemLog > 5000) {
-                    lastTelemLog = now;
-                    if (g_app.logger) {
-                        g_app.logger->logf(ILogger::Level::INFO, "TELEM", "Terminal: %.1fV %.1fA | BMS SOC: %.1f%%", v, i, state.getSocPercent());
-                    }
-                }
-            }
+            // TELEM removed — all data is in SVC_HEARTBEAT (V, I, SOC, Energy)
         }
     }
 
@@ -139,11 +145,20 @@ void ChargerService::pollPlugDetection(const StateSnapshot& snap) {
             bmsAge, snap.terminalVolt, snap.terminalCurr,
             (int)snap.batteryConnected, (int)snap.bmsSafeToCharge,
             (int)snap.transactionActive, (int)snap.faultLockActive);
-        // Additional guard: if terminal voltage is still high (>50V), the charger
-        // is still physically connected — don't flag as disconnected yet.
+
         if (snap.terminalVolt < 50.0f) {
+            // Voltage confirms disconnect
             shouldDisconnect = true;
+        } else if (!snap.transactionActive) {
+            // No active transaction: BMS silent > 8s = gun is being removed.
+            // The charger module (CAN1) keeps reporting voltage even after gun removal
+            // so we cannot rely on voltage alone — mark as disconnected now.
+            shouldDisconnect = true;
+            if (g_app.logger) g_app.logger->logf(ILogger::Level::INFO, "PLUG",
+                "BMS silent %lums (no active tx) — marking disconnected (V=%.1fV held by charger module)", bmsAge, snap.terminalVolt);
         } else {
+            // Transaction active: BMS may be recovering (cell balancing at high SOC)
+            // Keep waiting but keep logging.
             if (g_app.logger) g_app.logger->logf(ILogger::Level::WARN, "PLUG",
                 "BMS silent %lums but V=%.1fV — charger still connected, waiting for BMS recovery", bmsAge, snap.terminalVolt);
         }
@@ -191,7 +206,11 @@ void ChargerService::pollPlugDetection(const StateSnapshot& snap) {
 
     bool currentPlugState = (snap.gunPhysicallyConnected && snap.batteryConnected);
     if (currentPlugState != _lastPlugState) {
-        if (currentPlugState && g_app.logger) g_app.logger->log(ILogger::Level::INFO, "PLUG", "Gun plugged, vehicle detected");
+        if (currentPlugState && g_app.logger) {
+            g_app.logger->logf(ILogger::Level::INFO, "PLUG", 
+                "Gun plugged, vehicle detected | Vmax=%.1fV Imax=%.1fA", 
+                snap.BMS_Vmax, snap.BMS_Imax);
+        }
         _lastPlugState = currentPlugState;
     }
 

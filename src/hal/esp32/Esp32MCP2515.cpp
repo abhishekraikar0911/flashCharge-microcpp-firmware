@@ -153,13 +153,7 @@ bool Esp32MCP2515::receive(CanFrame& frame) {
     // Non-blocking pop from the software queue.
     // drainHardwareBuffer() must be called from a dedicated task to fill it.
     if (xQueueReceive(rxQueue, &frame, 0) == pdTRUE) {
-        static uint32_t lastRxLog = 0;
-        uint32_t now = millis();
-        // Rate limit logging to avoid flooding the serial monitor at 100Hz
-        if (now - lastRxLog > 5000) {
-            lastRxLog = now;
-            Serial.printf("[HAL_CAN2] RX OK ID: 0x%08lX len:%d\n", (long unsigned int)frame.id, (int)frame.len);
-        }
+        // Success logs removed to prevent console spam
         return true;
     }
     return false;

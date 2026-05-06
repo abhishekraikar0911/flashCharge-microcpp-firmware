@@ -10,7 +10,7 @@
 
 #include "services/OcppConnectionHelper.h"
 #include "system/HealthMonitor.h"
-#include "config/secrets.h"
+#include "config/secure_config.h"
 #include "config/certs.h"
 #include "system/SafeSerial.h"
 #include <Arduino.h>
@@ -56,15 +56,7 @@ namespace prod {
     }
 
     void UnifiedConnection::loop() {
-        static uint32_t lastLoopLog = 0;
-        if (millis() - lastLoopLog >= 30000) {
-            lastLoopLog = millis();
-            SafeSerial::printf("[CON] @%lums | Net=%d | GSM=%d | WS=%d\n", 
-                         millis(),
-                         (int)g_networkManager.getActiveConnection(), 
-                         (int)g_gsmManager.isConnected(), 
-                         (int)_gsmWsConnected);
-        }
+        // [CON] log removed \u2014 connection info (GSM/WS/CSQ) now shown inline in [SYS] log every 30s.
 
         if (g_networkManager.getActiveConnection() == ConnectionType::WIFI) {
             // Watchdog is now handled by actual receive events

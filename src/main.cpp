@@ -78,9 +78,17 @@ void setup()
 {
     Serial.begin(115200);
 
+    // Initialize health monitor with 30s Task Watchdog Timer first, 
+    // so the system is protected during the hardware stabilization delay.
+    g_healthMonitor.init();
+
     // STABILITY: 10s initial delay for power-on rails to stabilize and allow monitor connection
     // CAN transceivers, MCP2515, and GSM modem all need rails stable before init.
-    delay(10000);
+    Serial.println("[Boot] Waiting 10s for hardware power rails to stabilize...");
+    for (int i = 0; i < 100; i++) {
+        g_healthMonitor.feed(); // Feed TWDT to prevent reset during wait
+        delay(100);
+    }
 
     // ═══════════════════════════════════════════════════════════
     // HAL v1 BOOTSTRAP — Populate g_app with HAL and Driver refs
@@ -94,18 +102,30 @@ void setup()
     }
 
 
-    // Route MicroOcpp logs through SafeSerial to prevent line interleaving 
-    // Output often exceeds the 64-byte UART TX buffer, causing yields
-    mocpp_set_console_out([](const char* msg) { 
-        SafeSerial::print(msg); 
+    // Route MicroOcpp logs through SafeSerial to prevent line interleaving.
+    // We aggressively suppress two known spammy warnings:
+    // 1) "OCPP uninitialized" (occurs at 20Hz before GSM connects)
+    // 2) "Received response doesn't match pending operation" (occurs when CSMS sends duplicate IDs during MeterValue flush)
+    mocpp_set_console_out([](const char* msg) {
+        static uint32_t lastUninitWarn = 0;
+        
+        // Suppress uninitialized warnings to once every 30s
+        if (strstr(msg, "OCPP uninitialized") != nullptr) {
+            uint32_t now = millis();
+            if (now - lastUninitWarn < 30000) return;
+            lastUninitWarn = now;
+        }
+
+        // Completely suppress RequestQueue mismatch warnings (harmless CSMS quirk during StopTransaction)
+        if (strstr(msg, "Received response doesn't match") != nullptr) {
+            return;
+        }
+
+        SafeSerial::print(msg);
     });
 
     // Visual heartbeat setup (Now handled by HardwareService D15/D13)
     // Removed legacy LED_WIFI
-
-
-    // Initialize health monitor with 30s Task Watchdog Timer
-    g_healthMonitor.init();
 
     // SECURITY FIX: Load configuration from secure storage instead of hardcoded values
     char chargerId[32], csmsHost[128], csmsUrl[256];

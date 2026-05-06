@@ -71,13 +71,9 @@ bool Esp32Can::send(const CanFrame& frame) {
 
     static uint32_t lastTxLog = 0;
     uint32_t now = millis();
-    if (now - lastTxLog > 2000) {
+    if (err != ESP_OK && now - lastTxLog > 5000) {
         lastTxLog = now;
-        if (err == ESP_OK) {
-            Serial.printf("[HAL_CAN1] TX OK id=0x%08lX len=%d\n", (long unsigned int)frame.id, (int)frame.len);
-        } else {
-            Serial.printf("[HAL_CAN1] TX FAIL id=0x%08lX err=0x%X\n", (long unsigned int)frame.id, err);
-        }
+        Serial.printf("[HAL_CAN1] TX FAIL id=0x%08lX err=0x%X\n", (long unsigned int)frame.id, err);
     }
 
     xSemaphoreGive(mutex);
@@ -100,12 +96,7 @@ bool Esp32Can::receive(CanFrame& frame) {
             frame.data[i] = msg.data[i];
         }
 
-        static uint32_t lastRxLog = 0;
-        uint32_t now = millis();
-        if (now - lastRxLog > 5000) {
-            lastRxLog = now;
-            Serial.printf("[HAL_CAN1] RX OK ID: 0x%08lX len:%d\n", (long unsigned int)frame.id, (int)frame.len);
-        }
+        // Success logs removed to prevent console spam
 
         xSemaphoreGive(mutex);
         return true;

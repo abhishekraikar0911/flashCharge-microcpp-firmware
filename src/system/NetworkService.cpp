@@ -30,10 +30,13 @@ void NetworkService::poll() {
         if (current_time - _lastNetworkTime > COMM_LOSS_TIMEOUT_MS) {
             if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "SAFETY", "🚨 COMM LOSS: Emergency Stop after %ds outage",
                           (int)(COMM_LOSS_TIMEOUT_MS / 1000));
+            // Send alert first (best-effort — may fail if network is truly gone)
             ocpp::sendSystemAlert("COMMUNICATION_LOST",
                                   "Charging stopped due to network outage", "Critical");
             SystemState::instance().setStopReason(StopReason::NETWORK_LOSS);
-            ocpp::endTransactionSafe(nullptr, "Local");
+            // Use "Other" not "Local" — "Local" implies deliberate operator action (button press)
+            // The queued StopTransaction will be delivered when connectivity is restored (autoRecover)
+            ocpp::endTransactionSafe(nullptr, "Other");
             _commLossTriggered = true;
         }
     }

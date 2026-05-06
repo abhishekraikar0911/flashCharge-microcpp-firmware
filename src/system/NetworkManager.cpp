@@ -223,11 +223,7 @@ void NetworkManager::poll() {
         reconnect();
     }
 
-    // ── Periodic Status Log ──
-    if (now - _lastStatusLog >= 30000) {
-        _lastStatusLog = now;
-        printStatus();
-    }
+    // [NET] periodic printStatus removed — GSM/WS/CSQ now shown inline in [SYS] log.
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -333,28 +329,37 @@ void NetworkManager::syncNTP() {
         struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
         settimeofday(&tv, nullptr);
 
-        _timeSynced = true;
-
-        char timeStr[64];
-        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &tm);
-        Serial.printf("[NTP] ✅ Time synced via GSM: %s (TZ offset: %.1f)\n", timeStr, tz);
+        // Validate the time is sane (>= Jan 1, 2026) before marking as synced.
+        // Threshold: 1735689600 = Jan 1, 2026.
+        // The modem can return a partial/stale time during SIM registration.
+        if (t > 1735689600L) {
+            _timeSynced = true;
+            char timeStr[64];
+            strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &tm);
+            Serial.printf("[NTP] ✅ Time synced via GSM: %s (TZ offset: %.1f)\n", timeStr, tz);
+        } else {
+            Serial.printf("[NTP] ⚠️  GSM time rejected (year %d is implausible) — trying NTP over data\n", year);
+            goto ntp_over_data; // GSM time is stale, fall through to NTP-over-data
+        }
     } else {
         Serial.println("[NTP] ⚠️  Failed to get time from GSM modem");
+        ntp_over_data:
         // Fallback: try NTP over GSM data connection
+        // Threshold: 1735689600 = Jan 1, 2026.
         configTime(19800, 0, "pool.ntp.org", "time.google.com");
 
         uint32_t start = millis();
         time_t now = time(nullptr);
-        while (now < 1000000000L && millis() - start < 10000) {
+        while (now < 1735689600L && millis() - start < 10000) {
             delay(250);
             now = time(nullptr);
         }
 
-        if (now > 1000000000L) {
+        if (now > 1735689600L) {
             _timeSynced = true;
             Serial.println("[NTP] ✅ Time synced via NTP over GSM");
         } else {
-            Serial.println("[NTP] ❌ NTP sync failed — TLS certificates may be rejected");
+            Serial.println("[NTP] ❌ NTP sync failed — TLS certificates will be rejected");
         }
     }
 }

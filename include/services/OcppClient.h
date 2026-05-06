@@ -57,7 +57,9 @@ namespace ocpp
     /**
      * Send session summary via DataTransfer (after transaction ends)
      */
-    void sendSessionSummary(float finalSoc, double energyDelivered, float duration);
+    void sendSessionSummary(float finalSoc, double energyDelivered, float duration,
+                            int txId, const char* stopReason,
+                            float terminalVolt, float terminalCurr);
 
     /**
      * Send BMS alert to server
