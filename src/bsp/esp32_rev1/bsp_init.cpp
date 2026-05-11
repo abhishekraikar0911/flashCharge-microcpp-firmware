@@ -32,14 +32,14 @@
 #include "hal/esp32/Esp32MCP2515.h"
 
 // System Layer
-#include "system/FlashConfig.h"
+#include "config/FlashConfig.h"
 
 // Device Drivers
-#include "drivers/SingleRelay.h"
-#include "drivers/NtcSensor.h"
-#include "drivers/A7670ModemDriver.h"
-#include "drivers/DalyBmsDriver.h"
-#include "drivers/CM1ChargerDriver.h"
+#include "drivers/control/SingleRelay.h"
+#include "drivers/control/NtcSensor.h"
+#include "drivers/modem/A7670ModemDriver.h"
+#include "drivers/bms/DalyBmsDriver.h"
+#include "drivers/charger/CM1ChargerDriver.h"
 
 // Board constants (pin numbers, timeouts) from legacy hardware.h
 #include "config/hardware.h"
