@@ -41,9 +41,15 @@ namespace prod
         
         Serial.println("[WiFi] ✅ Secure WiFi credentials loaded successfully");
         
-        // Start connection from highest priority
-        currentPriorityIndex = 0;
-        return attemptConnection(currentPriorityIndex);
+        // Start connection trying highest priority first
+        for (int i = 0; i < numCredentials; i++) {
+            if (attemptConnection(i)) {
+                return true;
+            }
+        }
+        
+        Serial.println("[WiFi] ❌ All WiFi fallback priorities failed.");
+        return false;
     }
 
     bool WiFiManager::attemptConnection(int index) {

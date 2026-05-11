@@ -206,11 +206,7 @@ void ChargerService::pollPlugDetection(const StateSnapshot& snap) {
 
     bool currentPlugState = (snap.gunPhysicallyConnected && snap.batteryConnected);
     if (currentPlugState != _lastPlugState) {
-        if (currentPlugState && g_app.logger) {
-            g_app.logger->logf(ILogger::Level::INFO, "PLUG", 
-                "Gun plugged, vehicle detected | Vmax=%.1fV Imax=%.1fA", 
-                snap.BMS_Vmax, snap.BMS_Imax);
-        }
+        if (currentPlugState && g_app.logger) g_app.logger->log(ILogger::Level::INFO, "PLUG", "Gun plugged, vehicle detected");
         _lastPlugState = currentPlugState;
     }
 

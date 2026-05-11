@@ -14,11 +14,9 @@ void SafetyService::begin() {
         // Physical Start/Stop buttons: Active LOW, Normally Open
         g_app.gpio->setMode(BTN_START, IGpio::GPIO_INPUT_PULLUP);
         g_app.gpio->setMode(BTN_STOP,  IGpio::GPIO_INPUT_PULLUP);
-        // Fault indicator LED: Output, Active HIGH
-        g_app.gpio->setMode(LED_FAULT_STATUS, IGpio::GPIO_OUTPUT);
-        g_app.gpio->write(LED_FAULT_STATUS, false); // OFF at boot
+        // Note: LED_FAULT_STATUS (D13) is initialized and owned by LedService
         if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "SAFETY_SVC",
-            "Buttons initialized: E-Stop=GPIO32, Start=GPIO33, Stop=GPIO26, FaultLED=GPIO4");
+            "Buttons initialized: E-Stop=GPIO32, Start=GPIO33, Stop=GPIO26");
     }
 }
 
@@ -66,9 +64,7 @@ void SafetyService::pollEStop() {
         SystemState::instance().setChargingEnabled(false);
         SystemState::instance().setFaultLockActive(true);
         SystemState::instance().setFaultLockTime(now);
-
-        // Turn ON fault LED
-        if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, true);
+        // LED_FAULT_STATUS blink is handled by LedService polling faultLockActive
 
         _estopActive = true;
         _pendingEStopNotification = true;
@@ -117,7 +113,7 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
             SystemState::instance().setFaultLockActive(true);
             SystemState::instance().setFaultLockTime(now);
             SystemState::instance().setStopReason(StopReason::BMS_TIMEOUT);
-            if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, true); // Fault LED ON
+            // LED blink handled by LedService
             if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
                 "[BMS_TIMEOUT_10S] >>> endTransaction(Other) fired | txId=%d",
                 SystemState::instance().getActiveTransactionId());
@@ -172,7 +168,7 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
                         SystemState::instance().setFaultLockActive(true);
                         SystemState::instance().setFaultLockTime(now);
                         SystemState::instance().setStopReason(StopReason::BMS_SWITCH_OFF);
-                        if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, true); // Fault LED ON
+                        // LED blink handled by LedService
                         if (g_app.logger) g_app.logger->logf(ILogger::Level::ERROR, "STOP_TRIGGER",
                             "[BMS_SWITCH_OFF] >>> endTransaction(Other) fired | txId=%d",
                             SystemState::instance().getActiveTransactionId());
@@ -204,7 +200,7 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
         SystemState::instance().setChargingEnabled(false);
         if (g_app.charger) g_app.charger->stopCharging();
         if (g_app.relay)   g_app.relay->open();
-        if (g_app.gpio)    g_app.gpio->write(LED_FAULT_STATUS, true); // Fault LED ON
+        // LED blink handled by LedService
         if (snap.transactionActive && ocpp::isTransactionRunningSafe(1)) {
             SystemState::instance().setFaultLockActive(true);
             SystemState::instance().setFaultLockTime(now);
@@ -234,8 +230,7 @@ void SafetyService::pollFaultLock(const StateSnapshot& snap) {
         snap.chargerTemp  <= ALERT_TEMP_CRITICAL_C) {
         if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "FAULT", "Stability restored, fault lock cleared");
         SystemState::instance().setFaultLockActive(false);
-        // Turn OFF fault LED — system is healthy again
-        if (g_app.gpio) g_app.gpio->write(LED_FAULT_STATUS, false);
+        // LED_FAULT_STATUS will be turned OFF by LedService on next poll()
     }
 }
 
@@ -259,7 +254,7 @@ void SafetyService::pollButtons() {
         _startBtnActive     = false; // Reset so next press can fire again
     }
 
-    // ── STOP BUTTON (GPIO 4, Active LOW, INPUT_PULLUP) ──
+    // ── STOP BUTTON (GPIO 26, Active LOW, INPUT_PULLUP) ──
     bool stopPressed = !g_app.gpio->read(BTN_STOP);
     if (stopPressed) {
         if (_stopBtnRisingTime == 0) _stopBtnRisingTime = now;
@@ -330,10 +325,7 @@ void SafetyService::pollContactWelding(const StateSnapshot& snap) {
                 SystemState::instance().setFaultLockActive(true);
                 SystemState::instance().setFaultLockTime(now);
                 SystemState::instance().setStopReason(StopReason::FAULT);
-                
-                if (g_app.charger) g_app.charger->stopCharging();
-                if (g_app.relay)   g_app.relay->open();
-                if (g_app.gpio)    g_app.gpio->write(LED_FAULT_STATUS, true);
+                // LED blink handled by LedService
 
                 // OCPP Notification
                 ocpp::sendSystemAlert("PowerSwitchFailure", "Contact welding detected: no voltage decay", "Critical");

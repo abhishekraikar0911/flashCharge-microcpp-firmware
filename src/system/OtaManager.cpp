@@ -1,10 +1,12 @@
 #include "system/OtaManager.h"
 #include "config/production_config.h"
 #include "system/SecurityManager.h"
+#include "system/HealthMonitor.h"
 #include "services/OcppClient.h"
 #include "config/version.h"
 #include <Update.h>
 #include <MicroOcpp/Core/Context.h>
+#include <MicroOcpp/Core/Ftp.h>
 #include <MicroOcpp/Model/Model.h>
 #include <MicroOcpp/Model/FirmwareManagement/FirmwareService.h>
 #include <mbedtls/sha256.h>
@@ -60,10 +62,18 @@ namespace
             return true;
         }
 
+        // IMPROVEMENT: Batch SHA256 update over entire buffer — one mbedtls
+        // call per flush instead of one call per byte (~100x faster)
+        if (mbedtls_sha256_update_ret(&shaCtx, writeBuf, writeLen) != 0)
+        {
+            Serial.println("[OTA] ❌ SHA256 batch update failed");
+            return false;
+        }
+
         size_t written = Update.write(writeBuf, writeLen);
         if (written != writeLen)
         {
-            Serial.printf("[OTA] ? Write failed: %u/%u bytes\n", written, (unsigned)writeLen);
+            Serial.printf("[OTA] ❌ Write failed: %u/%u bytes\n", written, (unsigned)writeLen);
             return false;
         }
 
@@ -73,12 +83,8 @@ namespace
 
     static bool otaWriteOldest(uint8_t b)
     {
-        if (mbedtls_sha256_update_ret(&shaCtx, &b, 1) != 0)
-        {
-            Serial.println("[OTA] ? SHA256 update failed");
-            return false;
-        }
-
+        // Accumulate evicted byte into write buffer.
+        // SHA256 is now updated in otaFlushWriteBuf() as a batch.
         writeBuf[writeLen++] = b;
         if (writeLen >= OTA_WRITE_BUFFER)
         {
@@ -190,15 +196,17 @@ namespace prod
             return 0;
         }
 
-        Serial.printf("[OTA] Progress: %u bytes\\n", Update.progress());
+        Serial.printf("[OTA] 📦 Progress: %u bytes\n", Update.progress());
         return size;
     }
 
     void OTAManager::onDownloadComplete(int reason)
     {
-        if (reason != 0)
+        // FIX: MO_FtpCloseReason_Success = 1 (NOT 0).
+        // Previous check `reason != 0` incorrectly aborted on success.
+        if (reason != (int)MO_FtpCloseReason_Success)
         {
-            Serial.printf("[OTA] ? Download failed (reason: %d)\n", reason);
+            Serial.printf("[OTA] ❌ Download failed (reason: %d)\n", reason);
             Update.abort();
             otaReset();
             return;
@@ -235,9 +243,12 @@ namespace prod
             sig[i] = sigRing[(sigHead + i) % OTA_SIGNATURE_SIZE];
         }
 
+        // IMPROVEMENT: Feed watchdog before ECDSA verify — it can take
+        // significant time and risk a WDT reset mid-OTA.
+        g_healthMonitor.feed();
         if (!g_securityManager.verifyOTASignature(hash, sizeof(hash), sig, sizeof(sig)))
         {
-            Serial.println("[OTA] ? Signature verification failed");
+            Serial.println("[OTA] ❌ Signature verification failed");
             Update.abort();
             g_persistence.recordLastError("OTA_SIG_INVALID");
             ocpp::sendSystemAlert("OTA_SIGNATURE_INVALID", "Firmware signature check failed", "Critical");

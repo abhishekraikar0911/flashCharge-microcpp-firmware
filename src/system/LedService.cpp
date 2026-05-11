@@ -11,8 +11,10 @@ void LedService::begin() {
     if (g_app.gpio) {
         g_app.gpio->setMode(LED_CHARGER_STATUS, IGpio::GPIO_OUTPUT);
         g_app.gpio->setMode(LED_NETWORK_STATUS, IGpio::GPIO_OUTPUT);
+        g_app.gpio->setMode(LED_FAULT_STATUS, IGpio::GPIO_OUTPUT);
         g_app.gpio->write(LED_CHARGER_STATUS, false);
         g_app.gpio->write(LED_NETWORK_STATUS, false);
+        g_app.gpio->write(LED_FAULT_STATUS, false);
     }
     if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "LED_SVC", "Started");
 }
@@ -55,6 +57,16 @@ void LedService::poll() {
     }
     else {
         g_app.gpio->write(LED_CHARGER_STATUS, true);
+    }
+    // ── FAULT LED (D13): Blink 500ms = Fault Active, OFF = Healthy ──
+    // SafetyService no longer drives this pin directly — LedService is the
+    // single owner of LED_FAULT_STATUS to ensure consistent blink behaviour.
+    bool faultActive = SystemState::instance().getFaultLockActive();
+    if (faultActive) {
+        if (blinkToggle) g_app.gpio->write(LED_FAULT_STATUS, _faultLedState = !_faultLedState);
+    } else {
+        _faultLedState = false;
+        g_app.gpio->write(LED_FAULT_STATUS, false);
     }
 }
 

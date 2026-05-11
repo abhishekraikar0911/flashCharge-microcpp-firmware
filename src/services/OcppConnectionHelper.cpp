@@ -123,8 +123,18 @@ namespace prod {
             return;
         }
 
-        // Create a FRESH SSLClient for every new connection attempt
+        // OTA GUARD: OTA download owns the modem slot.
+        // CRITICAL: also destroy the WS SSLClient here so OTA gets a clean,
+        // unshared TinyGsmClient. Without this, both SSLClient objects reference
+        // the same modem slot simultaneously → NGINX fatal TLS alert.
+        if (g_networkManager.isOtaActive()) {
+            teardownGsmWebSocket();
+            return;
+        }
+
+
         if (!_sslClient) {
+
             _sslClient = new SSLClient(&g_gsmManager.getClient());
             // ENFORCE SECURITY PROFILE 2: Verify Server Certificate
             _sslClient->setCACert(ISRG_ROOT_X1_CERT);
@@ -342,6 +352,15 @@ namespace prod {
         }
 
         return true;
+    }
+    void UnifiedConnection::teardownGsmWebSocket() {
+        if (_sslClient) {
+            Serial.println("[WS_GSM] 🧼 Tearing down GSM WebSocket SSLClient...");
+            _sslClient->stop();
+            delete _sslClient;
+            _sslClient = nullptr;
+            _gsmWsConnected = false;
+        }
     }
 
 } // namespace prod

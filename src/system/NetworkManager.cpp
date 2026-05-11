@@ -214,14 +214,21 @@ void NetworkManager::poll() {
     }
 
     // ── WebSocket Idle Watchdog (Level 3) ──
-    // g_healthMonitor.feed(); // Feed watchdog during every poll - DISABLED for testing
+    // Skip entirely during GSM OTA download — the modem is intentionally busy
+    // and has no WebSocket activity. Without this guard, the watchdog fires
+    // every 90s and disconnects the modem, aborting the firmware download.
     now = millis();
-    if (isConnected() && SystemState::instance().getOcppInitialized() && now - _lastActivityTime >= GSM_WS_IDLE_TIMEOUT_MS) {
+    if (!isOtaActive() &&
+        isConnected() &&
+        SystemState::instance().getOcppInitialized() &&
+        now - _lastActivityTime >= GSM_WS_IDLE_TIMEOUT_MS)
+    {
         Serial.printf("[NET] ⚠️  WebSocket Idle Watchdog: No activity for %d s! Reconnecting...\n",
                       (int)((now - _lastActivityTime) / 1000));
         _lastActivityTime = now; // Reset to avoid constant trigger during reconnect
         reconnect();
     }
+
 
     // [NET] periodic printStatus removed — GSM/WS/CSQ now shown inline in [SYS] log.
 }
@@ -412,6 +419,54 @@ void NetworkManager::printStatus() {
     }
 
     Serial.println();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ON-DEMAND WIFI FOR OTA (does NOT disconnect GSM)
+// ═══════════════════════════════════════════════════════════
+
+bool NetworkManager::requestWiFiForOta() {
+    Serial.println("[NET] 📶 [OTA] Requesting WiFi for firmware download...");
+
+    // If WiFi is already connected (e.g. fallback mode), use it immediately.
+    if (g_wifiManager.isConnected()) {
+        Serial.println("[NET] ✅ [OTA] WiFi already connected — ready for download");
+        return true;
+    }
+
+    // Bring up WiFi without touching GSM.
+    // g_wifiManager.begin() loads credentials from SecureConfig internally.
+    // We do NOT call g_gsmManager.disconnect() here — OCPP stays alive.
+    Serial.println("[NET] 📶 [OTA] Starting WiFi radio (GSM OCPP stays connected)...");
+    WiFi.mode(WIFI_STA);
+
+    if (!g_wifiManager.begin(nullptr, nullptr)) {
+        Serial.println("[NET] ❌ [OTA] WiFi credentials not found in secure storage");
+        return false;
+    }
+
+    // g_wifiManager.begin() already waits up to CONNECT_TIMEOUT_MS (15 s)
+    // internally in attemptConnection(). If we reach here it succeeded.
+    if (g_wifiManager.isConnected()) {
+        Serial.printf("[NET] ✅ [OTA] WiFi connected for OTA (IP: %s, RSSI: %d dBm)\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        return true;
+    }
+
+    Serial.println("[NET] ❌ [OTA] WiFi connection failed — will fall back to GSM");
+    return false;
+}
+
+void NetworkManager::releaseWiFiAfterOta() {
+    Serial.println("[NET] 📵 [OTA] Releasing WiFi radio after firmware download...");
+    // Only kill WiFi if GSM is our primary — don't disconnect if WiFi is the
+    // active OCPP transport (edge case: device is on WiFi fallback).
+    if (_activeConnection != ConnectionType::WIFI) {
+        WiFi.disconnect(true);  // true = turn off radio completely
+        Serial.println("[NET] ✅ [OTA] WiFi radio off — GSM remains primary");
+    } else {
+        Serial.println("[NET] ℹ️  [OTA] WiFi is primary transport — keeping connected");
+    }
 }
 
 // ── Global Instance ──

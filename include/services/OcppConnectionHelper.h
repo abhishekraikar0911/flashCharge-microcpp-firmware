@@ -40,6 +40,14 @@ namespace prod {
         unsigned long getLastConnected() override;
         bool isConnected() override;
 
+        /**
+         * @brief Explicitly stop and delete the GSM WebSocket SSLClient.
+         * Called by GsmHttpDownload before OTA takes over the modem slot.
+         * Without this, the WebSocket SSLClient's live mbedTLS state shares
+         * TinyGsmClient with the OTA SSLClient, causing MAC verification failures.
+         */
+        void teardownGsmWebSocket();
+
     private:
         // ── WiFi Transport (Links2004) ──
         WebSocketsClient* _wifiWS = nullptr;
@@ -70,3 +78,6 @@ namespace prod {
     };
 
 } // namespace prod
+
+// Global instance — declared in OcppService.cpp, used by GsmHttpDownload
+namespace prod { extern UnifiedConnection* g_unifiedConnectionPtr; }

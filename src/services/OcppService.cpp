@@ -16,8 +16,10 @@
 #include "config/production_config.h"
 #include "config/secure_config.h"
 #include "system/OtaManager.h"
+#include "system/HttpOtaClient.h"
 // PHASE 4: Removed #include "ocpp_state_machine.h" — library manages state internally
 #include "config/certificates.h"
+#include "config/version.h"
 #include "system/NetworkManager.h"
 #include "services/OcppConnectionHelper.h"
 #include <MicroOcpp/Core/Context.h>
@@ -157,6 +159,15 @@ int ocpp::getTransactionIdSafe(unsigned int connectorId)
 
 bool ocpp::ocppPermitsChargeSafe(unsigned int connectorId)
 {
+    // Guard: MicroOcpp logs a warning on every call if the context is not yet
+    // initialized (before BootNotification completes). Suppress the spam by
+    // checking the init flag first — charging is never permitted before OCPP
+    // is up anyway.
+    if (!SystemState::instance().getOcppInitialized())
+    {
+        return false;
+    }
+
     OcppLock lock;
     if (!lock.ok())
     {
@@ -166,7 +177,8 @@ bool ocpp::ocppPermitsChargeSafe(unsigned int connectorId)
 }
 
 // Unified connection (GSM + WiFi + Watchdog)
-static prod::UnifiedConnection g_ocppConnection;
+prod::UnifiedConnection g_ocppConnection;
+prod::UnifiedConnection* prod::g_unifiedConnectionPtr = &g_ocppConnection;
 
 bool ocpp::init()
 {
@@ -479,8 +491,24 @@ bool ocpp::init()
             Serial.println("[OCPP] ❌ Mutex timeout - aborting init");
             return false;
         }
+
+        // FIX: Inject custom HTTPS downloader into MicroOcpp.
+        // Without this, MicroOcpp's default FtpClient rejects https:// URLs.
+        // Must be called BEFORE setDownloadFileWriter so the lambda captures
+        // the correct transport.
+        getOcppContext()->setFtpClient(
+            std::unique_ptr<prod::HttpOtaClient>(new prod::HttpOtaClient(ISRG_ROOT_X1_CERT))
+        );
+        Serial.println("[OCPP]   ✓ Custom HTTPS OTA downloader injected");
+
         if (auto fwService = getOcppContext()->getModel().getFirmwareService())
         {
+            // FIX: Register build number so MicroOcpp detects version change
+            // after OTA reboot and sends FirmwareStatusNotification(Installed).
+            // Without this, buildNumber is empty and Installed is never sent.
+            fwService->setBuildNumber(FIRMWARE_VERSION);
+            Serial.printf("[OCPP]   ✓ Build number registered: %s\n", FIRMWARE_VERSION);
+
             fwService->setDownloadFileWriter(
                 prod::OTAManager::onFirmwareData,
                 [](MO_FtpCloseReason reason) {

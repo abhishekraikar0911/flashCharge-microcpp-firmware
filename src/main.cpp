@@ -85,11 +85,11 @@ void setup()
     // STABILITY: 10s initial delay for power-on rails to stabilize and allow monitor connection
     // CAN transceivers, MCP2515, and GSM modem all need rails stable before init.
     Serial.println("[Boot] Waiting 10s for hardware power rails to stabilize...");
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 100; i++) 
+    {
         g_healthMonitor.feed(); // Feed TWDT to prevent reset during wait
         delay(100);
     }
-
     // ═══════════════════════════════════════════════════════════
     // HAL v1 BOOTSTRAP — Populate g_app with HAL and Driver refs
     // Placed AFTER delay(5000) so all power rails (CAN, SPI, GSM) are stable.
@@ -107,21 +107,35 @@ void setup()
     // 1) "OCPP uninitialized" (occurs at 20Hz before GSM connects)
     // 2) "Received response doesn't match pending operation" (occurs when CSMS sends duplicate IDs during MeterValue flush)
     mocpp_set_console_out([](const char* msg) {
-        static uint32_t lastUninitWarn = 0;
+        // MicroOcpp sends log lines in fragments (prefix, message, suffix).
+        // To suppress a warning, we must buffer the fragments until a newline,
+        // then examine the whole line.
+        static String logBuffer;
         
-        // Suppress uninitialized warnings to once every 30s
-        if (strstr(msg, "OCPP uninitialized") != nullptr) {
-            uint32_t now = millis();
-            if (now - lastUninitWarn < 30000) return;
-            lastUninitWarn = now;
-        }
+        logBuffer += msg;
+        
+        if (logBuffer.endsWith("\n")) {
+            static uint32_t lastUninitWarn = 0;
+            bool suppress = false;
+            
+            // Suppress uninitialized warnings to once every 30s
+            if (logBuffer.indexOf("OCPP uninitialized") >= 0) {
+                uint32_t now = millis();
+                if (now - lastUninitWarn < 30000) suppress = true;
+                else lastUninitWarn = now;
+            }
 
-        // Completely suppress RequestQueue mismatch warnings (harmless CSMS quirk during StopTransaction)
-        if (strstr(msg, "Received response doesn't match") != nullptr) {
-            return;
-        }
+            // Completely suppress RequestQueue mismatch warnings
+            if (logBuffer.indexOf("Received response doesn't match") >= 0) {
+                suppress = true;
+            }
 
-        SafeSerial::print(msg);
+            if (!suppress) {
+                SafeSerial::print(logBuffer.c_str());
+            }
+            
+            logBuffer = "";
+        }
     });
 
     // Visual heartbeat setup (Now handled by HardwareService D15/D13)
@@ -162,18 +176,19 @@ void setup()
     // Log reset reason
     esp_reset_reason_t reset_reason = esp_reset_reason();
     Serial.printf("[System] Reset reason: %d ", reset_reason);
-    switch (reset_reason) {
-        case ESP_RST_POWERON: Serial.println("(Power-on reset)"); break;
-        case ESP_RST_EXT:     Serial.println("(External pin reset)"); break;
-        case ESP_RST_SW:      Serial.println("(Software reset)"); break;
-        case ESP_RST_PANIC:   Serial.println("(Software panic reset) ❌ CRASH DETECTED"); break;
-        case ESP_RST_INT_WDT: Serial.println("(Interrupt watchdog reset) ⚠️  Tight loop?"); break;
-        case ESP_RST_TASK_WDT:Serial.println("(Task watchdog reset) ⚠️  Task blocked?"); break;
+    switch (reset_reason)
+    {
+        case ESP_RST_POWERON:  Serial.println("(Power-on reset)"); break;
+        case ESP_RST_EXT:      Serial.println("(External pin reset)"); break;
+        case ESP_RST_SW:       Serial.println("(Software reset)"); break;
+        case ESP_RST_PANIC:    Serial.println("(Software panic reset) ❌ CRASH DETECTED"); break;
+        case ESP_RST_INT_WDT:  Serial.println("(Interrupt watchdog reset) ⚠️  Tight loop?"); break;
+        case ESP_RST_TASK_WDT: Serial.println("(Task watchdog reset) ⚠️  Task blocked?"); break;
         case ESP_RST_WDT:      Serial.println("(Other watchdog reset)"); break;
         case ESP_RST_DEEPSLEEP:Serial.println("(Deep sleep reset)"); break;
         case ESP_RST_BROWNOUT: Serial.println("(Brownout reset - check power CPU/WiFi spike)"); break;
-        case ESP_RST_SDIO:    Serial.println("(SDIO reset)"); break;
-        default:              Serial.println("(Unknown reset)"); break;
+        case ESP_RST_SDIO:     Serial.println("(SDIO reset)"); break;
+        default:               Serial.println("(Unknown reset)"); break;
     }
 
     // If reset was not a clean power-on, a transaction may have been running.

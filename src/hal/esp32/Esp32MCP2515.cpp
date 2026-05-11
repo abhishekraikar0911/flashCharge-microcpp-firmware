@@ -216,6 +216,13 @@ void Esp32MCP2515::drainHardwareBuffer() {
     if (!isInit) return;
     if (xSemaphoreTake(mutex, pdMS_TO_TICKS(5)) != pdTRUE) return;
 
+    // [P1] Clear error interrupts to prevent INT pin from getting stuck LOW
+    uint8_t intf = mcp->getInterrupts();
+    if (intf & (MCP2515::CANINTF_ERRIF | MCP2515::CANINTF_MERRF)) {
+        if (intf & MCP2515::CANINTF_ERRIF) mcp->clearERRIF();
+        if (intf & MCP2515::CANINTF_MERRF) mcp->clearMERR();
+    }
+
     // [P1] Check and clear overflow flags before reading —
     // overflow flag must be cleared for MCP2515 to resume accepting new frames.
     uint8_t eflg = mcp->getErrorFlags();
@@ -352,7 +359,11 @@ void IRAM_ATTR Esp32MCP2515::intISR(void* arg) {
     TaskHandle_t task = self->rxTaskHandle;   // volatile read is safe in ISR
     if (task != nullptr) {
         vTaskNotifyGiveFromISR(task, &higherPriorityTaskWoken);
-        // Yield immediately so the high-priority CAN2_RX task can drain now
-        portYIELD_FROM_ISR(higherPriorityTaskWoken);
+        // FIX: Do NOT call portYIELD_FROM_ISR() here!
+        // During OTA flash erases, the ESP32 disables the SPI flash cache.
+        // If an immediate context switch occurs to the CAN2_RX task (which is in flash),
+        // it causes a fatal "Cache disabled but cached memory region accessed" panic.
+        // By omitting yield, the task switch is deferred until the next RTOS tick 
+        // (which safely respects cache locks). Max added latency is 1ms.
     }
 }

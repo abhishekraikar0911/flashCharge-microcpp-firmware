@@ -89,6 +89,31 @@ namespace prod {
          */
         void printStatus();
 
+        /**
+         * @brief Signal that an OTA download is in progress over GSM.
+         *        While true, the WebSocket reconnect loop is suppressed so the
+         *        modem's single TCP slot is not stolen from the OTA stream.
+         */
+        void setOtaActive(bool active) {
+            _otaActive = active;
+            // Reset idle watchdog timer when OTA starts/ends so it doesn't
+            // fire immediately after the download completes.
+            _lastActivityTime = millis();
+        }
+        bool isOtaActive() const { return _otaActive; }
+
+        /**
+         * @brief Request WiFi connection specifically for background OTA download.
+         *        This does NOT disconnect GSM, allowing OCPP to stay online.
+         * @return true if WiFi is connected and ready.
+         */
+        bool requestWiFiForOta();
+
+        /**
+         * @brief Release WiFi connection after OTA download completes.
+         */
+        void releaseWiFiAfterOta();
+
     private:
         // ── Connection Attempts ──
         GsmError attemptGSM();
@@ -115,6 +140,11 @@ namespace prod {
         // ── M3: WiFi exponential backoff ──
         uint32_t _wifiBackoffMs   = 2000;   // Starts at 2s, doubles up to 60s cap
         uint32_t _wifiNextAttempt = 0;      // millis() timestamp for next allowed attempt
+
+        // ── OTA Guard ──
+        // When true, the WebSocket reconnect loop is paused so the modem's
+        // single TCP slot is not stolen from an in-progress OTA download.
+        volatile bool _otaActive = false;
     };
 
     extern NetworkManager g_networkManager;

@@ -1,41 +1,51 @@
 #include "hal/esp32/Esp32UartLogger.h"
+#include "system/SafeSerial.h"
 #include <Arduino.h>
 #include <stdarg.h>
 
+// NOTE: We intentionally use SafeSerial's recursive mutex here instead of a
+// private mutex. This ensures the logger and every direct Serial.printf() call
+// in the codebase contend on the SAME lock, eliminating all interleaving.
+
 Esp32UartLogger::Esp32UartLogger(Level defaultLevel) : currentLevel(defaultLevel) {
-    _logMutex = xSemaphoreCreateMutex();
+    // _logMutex kept for ABI compatibility but unused — SafeSerial mutex is used instead
+    _logMutex = nullptr;
 }
 
 void Esp32UartLogger::init(uint32_t baud) {
     Serial.begin(baud);
-    // Small delay to allow USB/UART bridging to stabilize
     delay(10);
 }
 
 void Esp32UartLogger::log(Level level, const char* tag, const char* message) {
     if (level < currentLevel || level == Level::NONE) return;
 
-    if (xSemaphoreTake(_logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Serial.printf("[%s] [%s] %s\n", levelToString(level), tag, message);
-        xSemaphoreGive(_logMutex);
+    char buf[300];
+    snprintf(buf, sizeof(buf), "[%s] [%s] %s\n", levelToString(level), tag, message);
+
+    if (SafeSerial::lock(100)) {
+        Serial.print(buf);
+        SafeSerial::unlock();
     }
 }
 
 void Esp32UartLogger::logf(Level level, const char* tag, const char* fmt, ...) {
     if (level < currentLevel || level == Level::NONE) return;
 
-    if (xSemaphoreTake(_logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Serial.printf("[%s] [%s] ", levelToString(level), tag);
-        
-        va_list args;
-        va_start(args, fmt);
-        char buf[256];
-        vsnprintf(buf, sizeof(buf), fmt, args);
-        va_end(args);
-        
-        Serial.print(buf);
-        Serial.println();
-        xSemaphoreGive(_logMutex);
+    // Format the full line (prefix + message + newline) in one buffer,
+    // then emit it with a SINGLE Serial.print() call under the mutex.
+    char msgBuf[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msgBuf, sizeof(msgBuf), fmt, args);
+    va_end(args);
+
+    char lineBuf[300];
+    snprintf(lineBuf, sizeof(lineBuf), "[%s] [%s] %s\n", levelToString(level), tag, msgBuf);
+
+    if (SafeSerial::lock(100)) {
+        Serial.print(lineBuf);
+        SafeSerial::unlock();
     }
 }
 

@@ -17,11 +17,11 @@
 #define GPIO_CAN1_RX    22
 #define CAN1_BAUDRATE   250000
 
-// CAN2 - MCP2515 (SPI) - Vehicle BMS
-#define GPIO_SPI_CS     26
-#define GPIO_SPI_SCK    14
-#define GPIO_SPI_MOSI   27
-#define GPIO_SPI_MISO   25
+// CAN2 - MCP2515 (SPI) - Vehicle BMS (Aligned with hardware.h)
+#define GPIO_SPI_CS     5
+#define GPIO_SPI_SCK    18
+#define GPIO_SPI_MOSI   23
+#define GPIO_SPI_MISO   19
 #define GPIO_CAN2_INT   34
 #define CAN2_BAUDRATE   250000
 
@@ -31,11 +31,14 @@
 #define GPIO_GSM_RESET  23
 
 // ========== LED AND INTERFACE CONFIGURATION ==========
-#define GPIO_LED_CHARGER 13
-#define GPIO_LED_NETWORK 15
+#define GPIO_LED_CHARGER 4     // Charging
+#define GPIO_LED_NETWORK 15    // Server Connection
 #define GPIO_BTN_ESTOP   32
 #define GPIO_BTN_REBOOT  35
+#define GPIO_BTN_START   33    // Confirmed
+#define GPIO_BTN_STOP    26    // Confirmed
+#define GPIO_LED_FAULT   13    // Fault Detection
 
 // ========== CONTACTOR & SENSORS ==========
-#define GPIO_RELAY_PIN      4     // Example pin for contactor
-#define GPIO_NTC_ADC_PIN    33    // Example pin for thermistor
+#define GPIO_RELAY_PIN      14    // MOVED: GPIO 4 is Fault LED. Is this on 14 or 12?
+#define GPIO_NTC_ADC_PIN    39    // MOVED: GPIO 33 is Start Button. Production uses 39.

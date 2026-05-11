@@ -137,6 +137,7 @@ void OcppTransactionManager::handleStartTx(MicroOcpp::Transaction* tx) {
     
     // CRITICAL FIX: Reset session energy at the start of a transaction
     state.setEnergyWh(0.0);  // double precision reset (energyWh is double)
+    state.setStopReason(StopReason::NONE); // Clear any stale stop reasons (e.g. from boot)
 
     state.setActiveTransactionId(txId);
     state.setTransactionActive(true);
@@ -380,8 +381,8 @@ void OcppTransactionManager::handleStopTx(MicroOcpp::Transaction* tx) {
 //
 // The _stopTxPending guard is now handled in handleStopTx/handleStartTx directly.
 
-void OcppTransactionManager::startLocalTransaction(const char* idTag) {
-    
+void OcppTransactionManager::startLocalTransaction(const char* idTag) 
+{    
     // Safety check BEFORE sending to library
     if (!isVehiclePlugged()) {
         Serial.println("[TX_MGR] ⚠️ Cannot start local transaction: Gun not plugged in!");

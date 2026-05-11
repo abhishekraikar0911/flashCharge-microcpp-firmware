@@ -1,0 +1,16 @@
+﻿0x40083905: panic_abort at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_system/panic.c:408
+0x4008ea25: esp_system_abort at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_system/esp_system.c:137
+0x40093dfd: abort at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/newlib/abort.c:46
+0x4008212e: esp_flash_erase_region at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/spi_flash/esp_flash_api.c:561 (discriminator 5)
+0x4011df6f: esp_partition_erase_range at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/spi_flash/partition.c:540
+0x401101e1: EspClass::partitionEraseRange(esp_partition_t const*, unsigned int, unsigned int) at C:/Users/AKSHAY/.platformio/packages/framework-arduinoespressif32/cores/esp32/Esp.cpp:437
+0x400e7da3: UpdateClass::_writeBuffer() at C:/Users/AKSHAY/.platformio/packages/framework-arduinoespressif32/libraries/Update/src/Updater.cpp:217 (discriminator 4)
+0x400e7f71: UpdateClass::write(unsigned char*, unsigned int) at C:/Users/AKSHAY/.platformio/packages/framework-arduinoespressif32/libraries/Update/src/Updater.cpp:329
+0x400e03c5: (anonymous namespace)::otaFlushWriteBuf() at C:\Users\AKSHAY\Documents\PlatformIO\Projects\microocpp/src/system/OtaManager.cpp:73
+0x400e0556: prod::OTAManager::onFirmwareData(unsigned char const*, unsigned int) at C:\Users\AKSHAY\Documents\PlatformIO\Projects\microocpp/src/system/OtaManager.cpp:91
+ (inlined by) prod::OTAManager::onFirmwareData(unsigned char const*, unsigned int) at C:\Users\AKSHAY\Documents\PlatformIO\Projects\microocpp/src/system/OtaManager.cpp:184
+0x401b41e5: std::_Function_handler<unsigned int (unsigned char const*, unsigned int), unsigned int (*)(unsigned char const*, unsigned int)>::_M_invoke(std::_Any_data const&, unsigned char const*&&, unsigned int&&) at c:\users\akshay\.platformio\packages\toolchain-xtensa-esp32\xtensa-esp32-elf\include\c++\8.4.0\bits/std_function.h:282
+0x400fa9b2: std::function<unsigned int (unsigned char const*, unsigned int)>::operator()(unsigned char const*, unsigned int) const at c:\users\akshay\.platformio\packages\toolchain-xtensa-esp32\xtensa-esp32-elf\include\c++\8.4.0\bits/std_function.h:687
+ (inlined by) std::_Function_handler<unsigned int (unsigned char*, unsigned int), std::function<unsigned int (unsigned char const*, unsigned int)> >::_M_invoke(std::_Any_data const&, unsigned char*&&, unsigned int&&) at c:\users\akshay\.platformio\packages\toolchain-xtensa-esp32\xtensa-esp32-elf\include\c++\8.4.0\bits/std_function.h:282
+0x400df112: std::function<unsigned int (unsigned char*, unsigned int)>::operator()(unsigned char*, unsigned int) const at c:\users\akshay\.platformio\packages\toolchain-xtensa-esp32\xtensa-esp32-elf\include\c++\8.4.0\bits/std_function.h:687
+0x400df1bd: prod::WifiHttpDownload::loop() at C:\Users\AKSHAY\Documents\PlatformIO\Projects\microocpp/src/system/HttpOtaClient.cpp:103

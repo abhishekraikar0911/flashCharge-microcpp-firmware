@@ -59,16 +59,16 @@
 
 #define GSM_RECHECK_INTERVAL_MS 300000 // Retry GSM every 5 min while on WiFi (was 10min)
 #define GSM_CIPSTATUS_INTERVAL  30000  // AT+CIPSTATUS check interval
-#define GSM_WS_IDLE_TIMEOUT_MS  60000  // FIX E: Reduced from 90s to 60s — detect dead socket faster
+#define GSM_WS_IDLE_TIMEOUT_MS  90000  // 90s — dead socket detection (CitrineOS responds to Heartbeat every 60s)
 
 // ========== LED AND INTERFACE CONFIGURATION ==========
-#define LED_CHARGER_STATUS     13         // D13: Green/Yellow Charger Status
-#define LED_NETWORK_STATUS     15         // D15: Blue/White Network Status
+#define LED_CHARGER_STATUS     4          // D4: Charging Status LED
+#define LED_NETWORK_STATUS     15         // D15: Server/Network Status LED
 #define BTN_ESTOP              32         // Emergency Stop (Active LOW) - MOVED to 32
 #define BTN_REBOOT             35         // System Reboot — INPUT ONLY, NO internal pull-up (needs 10K ext. pull-up to 3.3V)
 #define BTN_START              33         // Local Start button (Active LOW, INPUT_PULLUP)
 #define BTN_STOP               26         // Local Stop button  (Active LOW, INPUT_PULLUP)
-#define LED_FAULT_STATUS       4          // Fault indicator LED (Active HIGH — ON = fault active)
+#define LED_FAULT_STATUS       13         // D13: Fault Detection LED (Active HIGH)
 
 // ========== SAFETY LIMITS ==========
 // Note: Use ALERT_VOLTAGE_MIN_V / ALERT_VOLTAGE_MAX_V from the ALERT THRESHOLDS section below
@@ -101,7 +101,7 @@
 #define TASK_STACK_SIZE_CAN_RX 6144       // Increased from 4096 — proven stable
 #define TASK_STACK_SIZE_CHARGER_COMM 6144  // Increased from 4096 — prevents stack overflow
 #define TASK_STACK_SIZE_UI 4096
-#define TASK_STACK_SIZE_OCPP 24576         // Increased to 24KB - MbedTLS handshake + MicroOcpp can be heavy
+#define TASK_STACK_SIZE_OCPP 40960         // 40KB: 24KB base + ~16KB for SSLClient/mbedTLS during GSM OTA download
 #define TASK_STACK_SIZE_WATCHDOG 2048
 #define TASK_STACK_SIZE_NETWORK 8192       // GSM/WiFi state machine + TLS
 

@@ -23,9 +23,10 @@ public:
 private:
     LedService() = default;
 
-    unsigned long _lastBlinkTime  = 0;
+    unsigned long _lastBlinkTime   = 0;
     bool          _chargerLedState = false;
     bool          _networkLedState = false;
+    bool          _faultLedState   = false;  // D13: blinks when faultLockActive
 };
 
 } // namespace prod

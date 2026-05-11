@@ -67,11 +67,11 @@ private:
 
     // CAN ID constants — Rivot Motors BMS protocol
     // 0x1806E5F4: BMS → MCU charge request (Vmax bytes 0-1, Imax bytes 2-3, Fault byte 4, SOC bytes 5-6)
-    // 0x18FF50E5: MCU → BMS charger status heartbeat (TX every 500ms)
+    // 0x18FF50E5: MCU → BMS charger status heartbeat (TX every 1000ms)
     static const uint32_t BMS_REQUEST_ID  = 0x1806E5F4; // BMS → MCU: charge request + SOC
     static const uint32_t HEARTBEAT_TX_ID = 0x18FF50E5; // MCU → BMS: charger feedback
     static const uint32_t TIMEOUT_MS      = 3000;
 
     uint32_t lastTxTimeMs;
-    static const uint32_t TX_INTERVAL_MS = 500;  // Send heartbeat + SOC request every 500ms
+    static const uint32_t TX_INTERVAL_MS = 1000; // Send heartbeat every 1000ms
 };
