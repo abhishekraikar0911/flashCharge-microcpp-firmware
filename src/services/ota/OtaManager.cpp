@@ -26,6 +26,7 @@ namespace
 
     static uint8_t writeBuf[OTA_WRITE_BUFFER];
     static size_t writeLen = 0;
+    static bool _updateValid = false;
 
     static void otaReset()
     {
@@ -39,11 +40,14 @@ namespace
         sigCount = 0;
         totalReceived = 0;
         writeLen = 0;
+        // _updateValid is NOT reset here because MicroOcpp needs to read it
+        // after otaReset() is called.
     }
 
     static bool otaStart()
     {
         otaReset();
+        _updateValid = false;
         mbedtls_sha256_init(&shaCtx);
         if (mbedtls_sha256_starts_ret(&shaCtx, 0) != 0)
         {
@@ -258,11 +262,12 @@ namespace prod
 
         if (Update.end(true))
         {
-            Serial.println("[OTA] ? Update complete! Rebooting...");
+            Serial.println("[OTA] ✅ Firmware flashed and signature verified successfully!");
             g_persistence.recordLastError("OTA_SUCCESS");
+            _updateValid = true;
             otaReset();
-            delay(1000);
-            ESP.restart();
+            // Reboot is now safely handled by MicroOcpp's updateExecutable callback
+            // to ensure standard-compliant status notifications.
         }
         else
         {
@@ -276,6 +281,11 @@ namespace prod
     {
         const char *lastError = g_persistence.getLastError();
         return (strcmp(lastError, "OTA_SUCCESS") == 0);
+    }
+
+    bool OTAManager::isUpdateValid()
+    {
+        return _updateValid;
     }
 
     OTAManager g_otaManager;

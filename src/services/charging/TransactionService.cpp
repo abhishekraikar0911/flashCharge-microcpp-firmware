@@ -340,13 +340,29 @@ void OcppTransactionManager::handleStopTx(MicroOcpp::Transaction* tx) {
 
     Serial.println("[TX_MGR] ════════════════════════════════════════════\n");
     // ─────────────────────────────────────────────────────────────────────
-    
+
+    // FINAL REASON SELECTION:
+    // Priority: hardware sysReason > OCPP moReason > "Unknown"
+    // If sysReasonEnum is NONE (e.g. library-internal stop or unrecognized path),
+    // fall back to what MicroOcpp itself reported in the StopTransaction message.
+    const char* finalReason;
+    if (sysReasonEnum != StopReason::NONE) {
+        finalReason = sysReason;   // hardware-diagnosed reason (most specific)
+    } else if (strcmp(moReason, "None") != 0) {
+        finalReason = moReason;    // OCPP library reason (e.g. "Local", "Remote", "EVDisconnected")
+    } else {
+        finalReason = "Unknown";   // last resort — never send bare "None" to server
+    }
+
+    Serial.printf("[TX_MGR] 📤 Final stopReason to OCPP server: '%s' (hw='%s' ocpp='%s')\n",
+                  finalReason, sysReason, moReason);
+
     ocpp::sendSessionSummary(
         snap.socPercent,
         snap.energyWh,
         durationMin,
         snap.activeTransactionId,   // txId — same value shown in serial [SYS] log
-        sysReason,                  // hardware stop reason, e.g. "BMS Charger Switch OFF"
+        finalReason,                // accurate stop reason — never "None"
         snap.terminalVolt,          // last known terminal voltage at stop
         snap.terminalCurr           // last known terminal current at stop
     );
@@ -432,8 +448,11 @@ void OcppTransactionManager::startLocalTransaction(const char* idTag)
 void OcppTransactionManager::stopLocalTransaction() {
     Serial.println("[TX_MGR] 🛑 Local Transaction Stop Request");
 
-    // Dispatch to MicroOcpp API.
-    // This will natively move state to Finishing and trigger handleStopTx().
+    // IMPORTANT: Set hardware stop reason BEFORE calling endTransactionSafe().
+    // handleStopTx() fires asynchronously after this call — the stop reason
+    // must already be set so handleStopTx picks it up correctly.
+    SystemState::instance().setStopReason(StopReason::LOCAL_BUTTON);
+
     bool success = ocpp::endTransactionSafe(nullptr, "Local", 1);
     if (!success) {
         Serial.println("[TX_MGR] ❌ MicroOcpp Native API refused local stop. (Reason: No active session OR Network Mutex Timeout - Try again)");

@@ -19,9 +19,13 @@ namespace prod
         
         // Check if update was successful after reboot
         static bool checkUpdateSuccess();
+
+        // Check if the freshly downloaded update is valid and ready to execute
+        static bool isUpdateValid();
     };
 
     extern OTAManager g_otaManager;
 }
 
 #endif // OTA_MANAGER_H
+

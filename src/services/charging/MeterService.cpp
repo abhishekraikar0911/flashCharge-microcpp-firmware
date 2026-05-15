@@ -134,6 +134,7 @@ void OcppMeterService::sendCompactTelemetry() {
             dataObj["s"] = serialized(String(s, 1));  // SoC (1 decimal)
             dataObj["e"] = serialized(String(e, 1));  // Energy Wh (1 decimal)
             dataObj["p"] = serialized(String(p, 1));  // Power W (1 decimal)
+            dataObj["t"] = millis();                  // Timestamp
 
             String dataStr;
             serializeJson(dataObj, dataStr);

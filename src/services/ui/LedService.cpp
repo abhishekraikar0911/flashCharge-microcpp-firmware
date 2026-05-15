@@ -19,17 +19,20 @@ void LedService::begin() {
     if (g_app.logger) g_app.logger->log(ILogger::Level::INFO, "LED_SVC", "Started");
 }
 
+
 void LedService::poll() {
     if (!g_app.gpio) return;
 
     unsigned long now = g_app.timer ? g_app.timer->millis() : 0;
     bool blinkToggle = false;
-    if (now - _lastBlinkTime >= 500) {
+    if (now - _lastBlinkTime >= 500)
+    {
         _chargerLedState = !_chargerLedState;
         _networkLedState = !_networkLedState;
         _lastBlinkTime   = now;
         blinkToggle      = true;
     }
+    
 
     // Network LED (D15): Blink = Connected, Steady ON = Offline
     if (prod::g_networkManager.isConnected()) {
@@ -58,15 +61,27 @@ void LedService::poll() {
     else {
         g_app.gpio->write(LED_CHARGER_STATUS, true);
     }
-    // ── FAULT LED (D13): Blink 500ms = Fault Active, OFF = Healthy ──
+    // ── FAULT LED (D13): Blink 1000ms = Fault Active, OFF = Healthy ──
     // SafetyService no longer drives this pin directly — LedService is the
     // single owner of LED_FAULT_STATUS to ensure consistent blink behaviour.
-    bool faultActive = SystemState::instance().getFaultLockActive();
+    bool faultActive = SystemState::instance().getFaultLockActive() || (libStatus == ChargePointStatus_Faulted);
     if (faultActive) {
         if (blinkToggle) g_app.gpio->write(LED_FAULT_STATUS, _faultLedState = !_faultLedState);
     } else {
         _faultLedState = false;
         g_app.gpio->write(LED_FAULT_STATUS, false);
+    }
+
+    // Debug logging once every 2 seconds
+    static unsigned long lastDebugLog = 0;
+    if (now - lastDebugLog >= 2000) {
+        lastDebugLog = now;
+        if (g_app.logger) {
+            g_app.logger->logf(ILogger::Level::DEBUG, "LED_SVC", 
+                "Status: libStatus=%d, hwFaultLock=%d, combinedFault=%d, chargingLED=%d, faultLED=%d", 
+                (int)libStatus, (int)SystemState::instance().getFaultLockActive(), (int)faultActive, 
+                (int)_chargerLedState, (int)_faultLedState);
+        }
     }
 }
 

@@ -124,6 +124,6 @@ public:
 // --------------------------------------------------------------------------
 // Global singleton — referenced by SecureConfig functions
 // --------------------------------------------------------------------------
-inline SecureCredentialStore g_secureCredentials;
+extern SecureCredentialStore g_secureCredentials;
 
 } // namespace SecureCredentials

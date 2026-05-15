@@ -5,12 +5,14 @@
  * @brief Firmware version information and build metadata
  * @author Rivot Motors
  * @date 2026
+ 
  */
 
-#define FIRMWARE_VERSION "2.5.2"
+#define FIRMWARE_VERSION "2.7.3"
 #define FIRMWARE_VERSION_MAJOR 2
-#define FIRMWARE_VERSION_MINOR 5
-#define FIRMWARE_VERSION_PATCH 2
+#define FIRMWARE_VERSION_MINOR 7
+#define FIRMWARE_VERSION_PATCH 3
+
 
 #define CHARGER_MODEL "RIVOT_100A"
 #define MANUFACTURER "Rivot Motors"

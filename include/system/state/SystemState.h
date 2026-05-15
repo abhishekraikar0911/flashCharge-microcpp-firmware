@@ -39,19 +39,21 @@ enum class StopReason : uint8_t {
     UNKNOWN         = 9,  // Catch-all for library-driven stops
     BMS_SWITCH_OFF  = 10, // BMS MOSFET protection trip mid-charge (SOC < 100%)
     BMS_FULL_CHARGE = 11, // BMS stopped charging because SOC reached 100%
+    LOCAL_BUTTON    = 12, // Physical STOP button (GPIO 26) pressed by operator
 };
 
 // Returns a human-readable string for a StopReason value.
 static inline const char* stopReasonStr(StopReason r) {
     switch (r) {
-        case StopReason::REMOTE:         return "RemoteStop";
+        case StopReason::REMOTE:         return "Remote";
+        case StopReason::LOCAL_BUTTON:   return "Local (Button)";
         case StopReason::EMERGENCY_STOP: return "EmergencyStop";
         case StopReason::BMS_TIMEOUT:    return "BMS Timeout";
         case StopReason::OVERTEMP:       return "OverTemp";
         case StopReason::FAULT:          return "Fault";
         case StopReason::CAN_TIMEOUT:    return "CAN Timeout";
         case StopReason::NETWORK_LOSS:   return "Network Loss";
-        case StopReason::POWER_RESTART:  return "Power Restart";
+        case StopReason::POWER_RESTART:  return "PowerLoss";          // OCPP 1.6 standard value
         case StopReason::BMS_SWITCH_OFF:  return "BMS Charger Switch OFF (Fault)";
         case StopReason::BMS_FULL_CHARGE:  return "Charge Complete (SOC=100%)";
         case StopReason::UNKNOWN:          return "Unknown";

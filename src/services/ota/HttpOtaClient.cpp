@@ -14,6 +14,12 @@
  *
  * @author Rivot Motors
  * @date 2026
+
+HttpOtaClient.cpp (The "Delivery Man")
+What's in it: Logic for both WifiHttpDownload and GsmHttpDownload. It contains the HTTP GET request code and TLS (SSL) security setup.
+Why it was written: Standard OTA libraries for ESP32 usually only work on WiFi. We wrote this custom file because your charger needs to be able to update over a GSM Modem (A7670).
+Key Logic: It includes a "GSM Teardown" feature. When a download starts over GSM, it "kills" the OCPP connection temporarily to free up memory so the download doesn't crash the chip.
+
  */
 
 #include "services/ota/HttpOtaClient.h"

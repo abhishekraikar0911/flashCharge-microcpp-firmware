@@ -515,6 +515,23 @@ bool ocpp::init()
                     prod::OTAManager::onDownloadComplete((int)reason);
                 }
             );
+            
+            // Allow MicroOcpp to transition to "Installing" before rebooting
+            fwService->setOnInstall([](const char* location) -> bool {
+                if (prod::OTAManager::isUpdateValid()) {
+                    Serial.println("[OTA] ⏳ MicroOcpp queued 'Installing'. Rebooting in 20 seconds to allow status flush...");
+                    xTaskCreate([](void* pvParameters) {
+                        vTaskDelay(pdMS_TO_TICKS(20000));
+                        ESP.restart();
+                        vTaskDelete(NULL);
+                    }, "OtaRebootTask", 2048, NULL, 1, NULL);
+                    return true;
+                } else {
+                    Serial.println("[OTA] ❌ Firmware valid flag not set, aborting installation phase.");
+                    return false;
+                }
+            });
+
             Serial.println("[OCPP]   ✓ OTA firmware update registered");
         }
         else
@@ -839,6 +856,7 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
             dataObj["model"] = modelName;
             dataObj["range"] = range;
             dataObj["vin"] = vin;
+            dataObj["timestamp"] = millis();
             
             String dataStr;
             serializeJson(dataObj, dataStr);
@@ -866,8 +884,7 @@ void ocpp::sendSessionSummary(float finalSoc, double energyDelivered, float dura
         return;
     }
     if (!isOperative()) {
-        Serial.println("[OCPP] ⚠️  Skip SessionSummary: not operative (offline). Will be lost.");
-        return;
+        Serial.println("[OCPP] ⚠️  Offline! SessionSummary will be queued and sent upon reconnect.");
     }
 
     Serial.printf("\n[OCPP] 📤 Sending SessionSummary to CSMS:\n");
@@ -892,6 +909,7 @@ void ocpp::sendSessionSummary(float finalSoc, double energyDelivered, float dura
             dataObj["durationMinutes"]   = duration;
             dataObj["terminalVolt"]      = terminalVolt;
             dataObj["terminalCurr"]      = terminalCurr;
+            dataObj["timestamp"]         = millis();
 
             String dataStr;
             serializeJson(dataObj, dataStr);
@@ -918,7 +936,7 @@ void ocpp::sendBMSAlert(const char* alertType, const char* message)
         return;
     }
     if (!isOperative()) {
-        return;
+        Serial.println("[OCPP] ⚠️  Offline! BMSAlert will be queued and sent upon reconnect.");
     }
 
     Serial.printf("[OCPP] 🚨 Sending BMSAlert: %s - %s\n", alertType, message);
@@ -955,7 +973,7 @@ void ocpp::sendSystemAlert(const char* alertType, const char* message, const cha
         return;
     }
     if (!isOperative()) {
-        return;
+        Serial.println("[OCPP] ⚠️  Offline! SystemAlert will be queued and sent upon reconnect.");
     }
 
     Serial.printf("[OCPP] 🚨 Alert [%s]: %s - %s\n", severity, alertType, message);
@@ -993,7 +1011,7 @@ void ocpp::sendChargerStatus(bool ready, const char* reason)
         return;
     }
     if (!isOperative()) {
-        return;
+        Serial.println("[OCPP] ⚠️  Offline! ChargerStatus will be queued and sent upon reconnect.");
     }
 
     Serial.printf("[OCPP] 📊 Sending ChargerStatus: %s - %s\n", ready ? "READY" : "NOT READY", reason);
