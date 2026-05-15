@@ -288,7 +288,7 @@ bool ocpp::init()
         // transport for GSM. Both enforce strict TLS using ISRG_ROOT_X1_CERT.
         mocpp_initialize(
             g_ocppConnection,
-            ChargerCredentials(DEFAULT_CHARGER_MODEL, DEFAULT_CHARGER_VENDOR),
+            ChargerCredentials(DEFAULT_CHARGER_MODEL, DEFAULT_CHARGER_VENDOR, FIRMWARE_VERSION),
             MicroOcpp::makeDefaultFilesystemAdapter(MicroOcpp::FilesystemOpt::Use),
             true); // autoRecover
         Serial.println("[OCPP] ✅ mocpp_initialize() completed");
@@ -606,6 +606,35 @@ void ocpp::poll()
             // Rising edge: WS just reconnected. Force status re-announcement.
             Serial.println("[OCPP] ✅ WebSocket reconnected — forcing StatusNotification re-sync with CSMS");
             lastReportedStatus = -1;
+
+            // DEFENSIVE LAYER 2: Push FirmwareInfo via DataTransfer on every reconnect.
+            // BootNotification carries firmwareVersion, but it is only sent once per power-on.
+            // If the CSMS missed it (or stored NULL from a previous firmware), this message
+            // lets the backend update the version field without waiting for a reboot.
+            sendRequest("DataTransfer",
+                []() -> std::unique_ptr<MicroOcpp::JsonDoc> {
+                    auto doc = std::unique_ptr<MicroOcpp::JsonDoc>(new MicroOcpp::JsonDoc(256));
+                    JsonObject payload = doc->to<JsonObject>();
+                    payload["vendorId"]  = "RivotMotors";
+                    payload["messageId"] = "FirmwareInfo";
+
+                    MicroOcpp::JsonDoc dataDoc(128);
+                    JsonObject dataObj = dataDoc.to<JsonObject>();
+                    dataObj["firmwareVersion"] = FIRMWARE_VERSION;
+                    dataObj["model"]           = DEFAULT_CHARGER_MODEL;
+                    dataObj["vendor"]          = DEFAULT_CHARGER_VENDOR;
+
+                    String dataStr;
+                    serializeJson(dataObj, dataStr);
+                    payload["data"] = dataStr;
+                    return doc;
+                },
+                [](JsonObject response) {
+                    Serial.printf("[OCPP] ✅ FirmwareInfo acknowledged by CSMS (status=%s)\n",
+                                  response["status"] | "Unknown");
+                }
+            );
+            Serial.printf("[OCPP] 📤 FirmwareInfo queued → version=%s\n", FIRMWARE_VERSION);
         }
         lastWsConnected = wsNowConnected;
     }
