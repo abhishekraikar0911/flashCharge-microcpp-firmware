@@ -158,8 +158,10 @@ void NetworkManager::poll() {
             break;
 
         case NetworkState::GSM_CONNECTED:
-            // Monitor GSM health
-            g_gsmManager.poll();
+            // Monitor GSM health (Skip during OTA to prevent AT commands from corrupting the TLS stream)
+            if (!isOtaActive()) {
+                g_gsmManager.poll();
+            }
 
             if (!g_gsmManager.isConnected()) {
                 bool charging = SystemState::instance().snapshot().transactionActive;
@@ -442,6 +444,7 @@ bool NetworkManager::requestWiFiForOta() {
 
     if (!g_wifiManager.begin(nullptr, nullptr)) {
         Serial.println("[NET] ❌ [OTA] WiFi credentials not found in secure storage");
+        WiFi.disconnect(true); // Shut down radio to stop NO_AP_FOUND spam
         return false;
     }
 
@@ -454,6 +457,7 @@ bool NetworkManager::requestWiFiForOta() {
     }
 
     Serial.println("[NET] ❌ [OTA] WiFi connection failed — will fall back to GSM");
+    WiFi.disconnect(true); // Turn off radio to stop NO_AP_FOUND background spam
     return false;
 }
 

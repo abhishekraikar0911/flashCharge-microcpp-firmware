@@ -123,14 +123,10 @@ namespace prod {
             return;
         }
 
-        // OTA GUARD: OTA download owns the modem slot.
-        // CRITICAL: also destroy the WS SSLClient here so OTA gets a clean,
-        // unshared TinyGsmClient. Without this, both SSLClient objects reference
-        // the same modem slot simultaneously → NGINX fatal TLS alert.
-        if (g_networkManager.isOtaActive()) {
-            teardownGsmWebSocket();
-            return;
-        }
+        // OTA GUARD: Native GSM OTA no longer requires tearing down the
+        // WebSocket because the modem handles the HTTPS TLS internally.
+        // We let the OCPP WebSocket stay alive during the download.
+        // if (g_networkManager.isOtaActive()) { ... }
 
 
         if (!_sslClient) {

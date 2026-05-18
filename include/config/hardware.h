@@ -37,11 +37,24 @@
 #define CHARGER_CURR_FB_SCALE   10.0f      // feedback: A × 10 → uint16 code
 
 // ========== GSM MODEM CONFIGURATION (SIM A7670C) ==========
-#define GSM_TX_PIN        17         // ESP32 TX → Modem RXD (UART2)
-#define GSM_RX_PIN        16         // ESP32 RX ← Modem TXD (UART2)
-#define GSM_RESET_PIN     27         // Modem RESET — moved from 23 (GPIO 23 now = MCP2515 MOSI)
-#define GSM_BAUD_RATE     115200
+#define GSM_TX_PIN        17         // ESP32 TX  → Modem RXD (UART2)
+#define GSM_RX_PIN        16         // ESP32 RX  ← Modem TXD (UART2)
+#define GSM_RESET_PIN     27         // Modem RESET
+// Baud rate strategy: boot at 115200 (factory default), then shift to 460800
+// AT+IPR=460800 is sent after modem init. Both ends switch simultaneously.
+// RTS/CTS hardware flow control is REQUIRED at high baud (wires soldered: GPIO14, GPIO25)
+#define GSM_BOOT_BAUD     115200     // Always boot at this speed (factory default)
+#define GSM_HIGH_BAUD     460800     // High-speed target after baud negotiation
 #define GSM_SERIAL        Serial2    // Hardware UART2
+
+// GSM Hardware Flow Control (RTS/CTS) — Jumper wires soldered
+// Cross-connection (null-modem style):
+//   ESP32 GPIO14 (RTS out) ──wire──▶ A7670 CTS pin  (ESP32 tells modem: pause/resume)
+//   ESP32 GPIO25 (CTS in)  ◀──wire── A7670 RTS pin  (modem tells ESP32: I have data)
+// When ESP32 is erasing flash (CPU frozen), hardware automatically pulls GPIO14 HIGH,
+// the A7670 modem sees this and IMMEDIATELY stops sending bytes. Zero UART overflow.
+#define GSM_RTS_PIN       14         // ESP32 GPIO14 OUTPUT → A7670 CTS input
+#define GSM_CTS_PIN       25         // A7670 RTS output → ESP32 GPIO25 INPUT
 
 // GSM APN Configuration: loaded at runtime from secure NVS via SecureConfig::getGSMCredentials()
 // (No hardcoded APN to avoid leaking credentials in source control)

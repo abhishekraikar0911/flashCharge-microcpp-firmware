@@ -15,6 +15,7 @@
 #include "config/secure_config.h"
 #include "services/safety/HealthMonitor.h"
 #include <Arduino.h>
+#include <driver/uart.h>  // ESP-IDF UART driver — needed for uart_set_hw_flow_ctrl()
 
 namespace prod {
 
@@ -55,8 +56,13 @@ void GSMManager::init() {
     digitalWrite(GSM_RESET_PIN, LOW);  // Double ensure
     Serial.printf("[GSM] RESET pin (GPIO %d) initialized LOW\n", GSM_RESET_PIN);
 
-    // Initialize UART2 for modem communication
-    GSM_SERIAL.begin(GSM_BAUD_RATE, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+    // Initialize UART2 at factory default baud (115200) — NO flow control yet.
+    // Flow control must NOT be active during modem boot:
+    //   - A7670's RTS pin may be HIGH (not ready) while powering on.
+    //   - With CTS-check active, ESP32 UART would refuse to send AT commands.
+    //   - Hardware flow control is enabled AFTER modem confirms awake (stepModemReady).
+    GSM_SERIAL.setRxBufferSize(16384);
+    GSM_SERIAL.begin(GSM_BOOT_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
     delay(100);
 
     // Construct TinyGSM objects using placement new
@@ -66,8 +72,9 @@ void GSMManager::init() {
     _initialized = true;
     _state = GSMState::MODEM_OFF;
 
-    Serial.printf("[GSM] ✅ GSM Manager initialized (TX=%d, RX=%d, RST=%d, Baud=%d)\n",
-                  GSM_TX_PIN, GSM_RX_PIN, GSM_RESET_PIN, GSM_BAUD_RATE);
+    Serial.printf("[GSM] ✅ GSM Manager initialized (TX=%d, RX=%d, RST=%d, RTS=%d, CTS=%d, Boot=%d, Target=%d)\n",
+                  GSM_TX_PIN, GSM_RX_PIN, GSM_RESET_PIN, GSM_RTS_PIN, GSM_CTS_PIN,
+                  GSM_BOOT_BAUD, GSM_HIGH_BAUD);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -117,17 +124,48 @@ bool GSMManager::stepBoot() {
     setState(GSMState::MODEM_BOOT);
     Serial.printf("[GSM] 🔌 Step 1/6: Booting modem... (Heap: %u)\n", ESP.getFreeHeap());
 
-    // Strategy: Try AT first. If it responds, it's already on.
-    // If not, try a short hardware pulse.
+    // ── Phase 1: Try boot baud (115200) ─────────────────────────────────────
+    // Normal case: modem is freshly powered or already at factory default baud.
     if (waitForAT(2000)) {
-        Serial.println("[GSM] ✅ Modem already powered and responding");
+        Serial.println("[GSM] ✅ Modem already responding at 115200");
         return true;
     }
 
-    Serial.println("[GSM] 🔄 Modem silent, performing hardware RESET...");
+    // ── Phase 2: Try high baud (460800) ─────────────────────────────────────
+    // The A7670 saves AT+IPR baud setting to its own flash. If the previous
+    // session shifted to 460800, the modem boots at that speed on next power-on.
+    // We need to detect this, reset it to 115200, then continue normally.
+    Serial.printf("[GSM] 🔍 No response at %d — probing %d (sticky AT+IPR?)...\n",
+                  GSM_BOOT_BAUD, GSM_HIGH_BAUD);
+    GSM_SERIAL.begin(GSM_HIGH_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+    delay(50);
+
+    if (waitForAT(2000)) {
+        // Modem is stuck at high baud from a previous session.
+        // Send AT+IPR=0 (auto-baud) then AT+IPR=115200 to reset it permanently.
+        Serial.printf("[GSM] ⚠️  Modem stuck at %d! Resetting baud to %d...\n",
+                      GSM_HIGH_BAUD, GSM_BOOT_BAUD);
+        _modem.sendAT("+IPR=" + String(GSM_BOOT_BAUD));
+        _modem.waitResponse(500);
+        delay(100);
+        // Now switch ESP32 back to boot baud to match
+        GSM_SERIAL.begin(GSM_BOOT_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+        delay(100);
+        if (waitForAT(2000)) {
+            Serial.println("[GSM] ✅ Baud reset confirmed. Proceeding at 115200.");
+            return true;
+        }
+        Serial.println("[GSM] ❌ Baud reset verification failed");
+    } else {
+        // Restore to boot baud before hard reset attempt
+        GSM_SERIAL.begin(GSM_BOOT_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+        delay(50);
+    }
+
+    // ── Phase 3: Hard reset ──────────────────────────────────────────────────
+    Serial.println("[GSM] 🔄 Modem silent at all baud rates — hardware RESET...");
     hardReset();
 
-    // Wait for modem to respond to AT (Increased to 30s)
     if (!waitForAT(30000)) {
         Serial.println("[GSM] ❌ Modem did not respond after hard reset");
         setState(GSMState::ERROR);
@@ -155,6 +193,36 @@ bool GSMManager::stepModemReady() {
     // Disable echo for cleaner AT parsing
     _modem.sendAT("+ATE0");
     _modem.waitResponse();
+
+    // ── High-Speed Baud Shift: 115200 → 460800 ───────────────────────────
+    // 1. Tell the A7670 modem to switch its UART to 460800 baud.
+    // 2. The modem ACKs with "OK" at the current speed (115200), THEN switches.
+    // 3. We immediately switch the ESP32 Serial2 to 460800 to match.
+    // 4. Hardware RTS/CTS (GPIO14/25) guarantees no overflow at this speed.
+    Serial.printf("[GSM] ⚡ Shifting baud: %d → %d (AT+IPR)...\n",
+                  GSM_BOOT_BAUD, GSM_HIGH_BAUD);
+    _modem.sendAT("+IPR=" + String(GSM_HIGH_BAUD));
+    if (_modem.waitResponse(1000) == 1) {
+        // Modem accepted — now both sides switch
+        delay(50); // Brief pause for modem to commit baud change
+        GSM_SERIAL.begin(GSM_HIGH_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+        delay(50);
+        // Re-apply hardware flow control after baud change
+        uart_set_pin(UART_NUM_2, GSM_TX_PIN, GSM_RX_PIN, GSM_RTS_PIN, GSM_CTS_PIN);
+        uart_set_hw_flow_ctrl(UART_NUM_2, UART_HW_FLOWCTRL_CTS_RTS, 64);
+        // Verify with a quick AT ping at the new speed
+        if (waitForAT(2000)) {
+            Serial.printf("[GSM] ✅ Baud shift confirmed at %d!\n", GSM_HIGH_BAUD);
+        } else {
+            // Fallback: revert to boot baud if modem didn't follow
+            Serial.println("[GSM] ⚠️  Baud shift failed — reverting to 115200");
+            GSM_SERIAL.begin(GSM_BOOT_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+            uart_set_pin(UART_NUM_2, GSM_TX_PIN, GSM_RX_PIN, GSM_RTS_PIN, GSM_CTS_PIN);
+            uart_set_hw_flow_ctrl(UART_NUM_2, UART_HW_FLOWCTRL_CTS_RTS, 64);
+        }
+    } else {
+        Serial.println("[GSM] ⚠️  AT+IPR not acknowledged — staying at 115200");
+    }
 
     // Get modem info for diagnostics
     String modemName = _modem.getModemName();

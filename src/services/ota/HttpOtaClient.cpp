@@ -27,7 +27,9 @@ Key Logic: It includes a "GSM Teardown" feature. When a download starts over GSM
 #include "services/network/GsmManager.h"
 #include "services/safety/HealthMonitor.h"
 #include "config/certificates.h"
+#include "config/hardware.h"
 #include "services/ocpp/OcppConnectionHelper.h"
+#include <esp_task_wdt.h>
 #include <Arduino.h>
 
 namespace prod {
@@ -125,337 +127,338 @@ void WifiHttpDownload::loop() {
 }
 
 // =============================================================================
-// GsmHttpDownload — Non-blocking HTTPS download over A7670 + SSLClient
+// NativeGsmHttpDownload — HTTPS download via SSLClient + raw HTTP Range requests
 // =============================================================================
+//
+// WHY THIS APPROACH:
+//   The A7670 Classic HTTP AT engine (AT+HTTP...) has a hard 64KB buffer limit
+//   and no working Range header support (BREAK/BREAKEND not in V11.0.01,
+//   USERDATA ignored by server). Classic HTTP is dead for 1.3MB OTA.
+//
+// THIS APPROACH (same as the WebSocket uses):
+//   SSLClient wrapping TinyGsmClient → raw HTTP/1.1 GET with Range header.
+//   The WebSocket ALREADY proves this stack works. We just repurpose it for OTA.
+//
+// Flow per 60KB range slice:
+//   1. Tear down WebSocket (frees the shared TinyGsmClient channel)
+//   2. SSLClient ssl(&g_gsmManager.getClient()); ssl.setCACert(...);
+//   3. ssl.connect(host, 443)
+//   4. ssl.print("GET /path HTTP/1.1\r\nRange: bytes=X-Y\r\n...")
+//   5. Read HTTP response headers → parse status + Content-Range
+//   6. Stream body bytes directly to flash in 512B chunks (no modem buffer)
+//   7. ssl.stop() → close TCP, free TinyGsmClient channel
+//   8. Repeat until all bytes written
 
-// How long (ms) to wait without receiving any bytes before giving up.
-// A7670 LTE link should always deliver within this window if the server
-// has data. 90 seconds gives plenty of margin for slow cellular conditions.
-static constexpr uint32_t OTA_STALL_TIMEOUT_MS = 90000;
-
-GsmHttpDownload::GsmHttpDownload(
+// ---------------------------------------------------------------------------
+// Constructor — parse URL, store fields. Actual setup happens in _setup().
+// ---------------------------------------------------------------------------
+NativeGsmHttpDownload::NativeGsmHttpDownload(
     const char* url,
     std::function<size_t(unsigned char*, size_t)> writer,
     std::function<void(MO_FtpCloseReason)>        onClose,
     const char* caCert)
-    : _writer(writer), _onClose(onClose)
+    : _writer(writer), _onClose(onClose), _caCert(caCert)
 {
-    Serial.printf("[OTA_HTTP] Starting GSM download: %s\n", url);
+    Serial.printf("[OTA_GSM] Preparing native GSM HTTPS download: %s\n", url);
 
     if (!g_gsmManager.isConnected()) {
-        Serial.println("[OTA_HTTP] ERROR: GSM modem not connected");
+        Serial.println("[OTA_GSM] ERROR: GSM modem not connected");
         if (_onClose) _onClose(MO_FtpCloseReason_Failure);
         return;
     }
 
-    // OTA GUARD: Prevent WebSocket reconnect and Idle Watchdog from stealing
-    // the modem's single TCP slot while we are downloading.
-    g_networkManager.setOtaActive(true);  // also resets _lastActivityTime
-    _lastWdtFeed = millis();
-    Serial.println("[OTA_HTTP] Modem slot reserved (WS reconnect + idle watchdog suppressed)");
-
-    // CRITICAL: Explicitly teardown the WebSocket SSLClient if it exists.
-    // This is required because the mbedTLS state in the WS SSLClient
-    // conflicts with the new SSLClient we are about to create.
-    if (g_unifiedConnectionPtr) {
-        g_unifiedConnectionPtr->teardownGsmWebSocket();
-    }
-
-    // Force-close any existing TCP connection on the modem slot.
-
-    // loopGSM() runs BEFORE getFile() in the same mocpp_loop() tick, so the
-    // WebSocket SSLClient may still be alive. Calling stop() here evicts it
-    // so our OTA SSLClient gets a clean connection.
-    g_gsmManager.getClient().stop();
-    delay(300);
-    Serial.println("[OTA_HTTP] Modem TCP slot cleared");
-
-    // -- Parse URL: extract scheme, host, port, path --
-    char host[128] = {};
-    char path[512] = {};
-    uint16_t port = 443;
-    bool isHttps  = true;
+    strncpy(_url, url, sizeof(_url) - 1);
 
     const char* src = url;
-    if      (strncmp(src, "https://", 8) == 0) { src += 8; isHttps = true;  port = 443; }
-    else if (strncmp(src, "http://",  7) == 0) { src += 7; isHttps = false; port = 80;  }
+    if      (strncmp(src, "https://", 8) == 0) { src += 8; _isHttps = true;  _port = 443; }
+    else if (strncmp(src, "http://",  7) == 0) { src += 7; _isHttps = false; _port = 80;  }
     else {
-        Serial.println("[OTA_HTTP] ERROR: Unsupported URL scheme (not http/https)");
-        g_networkManager.setOtaActive(false);
+        Serial.println("[OTA_GSM] ERROR: Unsupported URL scheme");
         if (_onClose) _onClose(MO_FtpCloseReason_Failure);
         return;
     }
 
     const char* slash = strchr(src, '/');
     size_t hostLen = slash ? (size_t)(slash - src) : strlen(src);
-    strncpy(host, src, min(hostLen, sizeof(host) - 1));
+    strncpy(_host, src, min(hostLen, sizeof(_host) - 1));
 
-    // Parse explicit port from host (e.g. host:9000)
-    char* colon = strchr(host, ':');
-    if (colon) {
-        port = (uint16_t)atoi(colon + 1);
-        *colon = '\0';
+    char* colon = strchr(_host, ':');
+    if (colon) { _port = (uint16_t)atoi(colon + 1); *colon = '\0'; }
+
+    strncpy(_path, slash ? slash : "/", sizeof(_path) - 1);
+
+    Serial.printf("[OTA_GSM]   Host: %s  Port: %d  HTTPS: %d\n",
+                  _host, _port, (int)_isHttps);
+
+    g_networkManager.setOtaActive(true);
+    _lastWdtFeed = millis();
+    _lastDataMs  = millis();
+    _active      = true;
+    _state       = State::SETUP;
+}
+
+// ---------------------------------------------------------------------------
+// Destructor
+// ---------------------------------------------------------------------------
+NativeGsmHttpDownload::~NativeGsmHttpDownload() {
+    g_networkManager.setOtaActive(false);
+    Serial.println("[OTA_GSM] Modem slot released");
+}
+
+// ---------------------------------------------------------------------------
+// _finish() — Call onClose and mark download inactive
+// ---------------------------------------------------------------------------
+void NativeGsmHttpDownload::_finish(MO_FtpCloseReason reason) {
+    _active = false;
+    _state  = State::DONE;
+    Serial.println("[OTA_GSM] Download session ended");
+    if (_onClose) _onClose(reason);
+}
+
+// Stubs — AT helpers no longer used by the new SSLClient-based implementation
+bool NativeGsmHttpDownload::_sendATRaw(const char*) { return true; }
+bool NativeGsmHttpDownload::_sendATBlocking(const char*, const char*, uint32_t) { return true; }
+
+// ---------------------------------------------------------------------------
+// _setup() — One-time init: tear down WebSocket, reset state.
+// ---------------------------------------------------------------------------
+bool NativeGsmHttpDownload::_setup() {
+    Serial.println("[OTA_GSM] === GSM OTA Setup (SSLClient Range Mode) ===");
+
+    // Flush stale UART data
+    while (GSM_SERIAL.available()) GSM_SERIAL.read();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    while (GSM_SERIAL.available()) GSM_SERIAL.read();
+
+    // Tear down WebSocket — frees the shared TinyGsmClient channel for OTA
+    if (g_unifiedConnectionPtr) {
+        Serial.println("[OTA_GSM] Releasing OCPP WebSocket for OTA use...");
+        g_unifiedConnectionPtr->teardownGsmWebSocket();
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Let modem fully close TCP
     }
 
-    strncpy(path, slash ? slash : "/", sizeof(path) - 1);
+    _contentLength = -1;
+    _bytesReceived = 0;
+    _rangeStart    = 0;
+    _lastDataMs    = millis();
 
-    Serial.printf("[OTA_HTTP]    Host: %s  Port: %d  HTTPS: %d\n", host, port, (int)isHttps);
+    Serial.println("[OTA_GSM] Setup OK — downloading in 60KB slices via SSLClient...");
+    return true;
+}
 
-    // -- Choose transport --
-    if (isHttps) {
-        _ssl = new SSLClient(&g_gsmManager.getClient());
-        _ssl->setCACert(caCert ? caCert : ISRG_ROOT_X1_CERT);
-        _activeClient = _ssl;
-        Serial.println("[OTA_HTTP]    Transport: SSLClient (TLS)");
-    } else {
-        _ssl = nullptr;
-        _activeClient = &g_gsmManager.getClient();
-        Serial.println("[OTA_HTTP]    Transport: TinyGsmClient (plain HTTP)");
+// ---------------------------------------------------------------------------
+// _downloadRange() — Open a fresh TLS connection, send a Range GET, stream
+//                    the body bytes directly to flash. No modem buffer involved.
+// ---------------------------------------------------------------------------
+bool NativeGsmHttpDownload::_downloadRange() {
+    // ── CRITICAL: Prevent IDLE0 Starvation & TWDT Panic ────────────────────
+    // mbedtls blocks inside ssl.read() waiting for a full TLS record.
+    // Drop to priority 0 so yield() shares CPU with IDLE0, preventing TWDT panic.
+    // Temporarily unsubscribe from TWDT while waiting for slow GSM packets.
+    UBaseType_t originalPriority = uxTaskPriorityGet(NULL);
+    vTaskPrioritySet(NULL, 0);
+    esp_task_wdt_delete(NULL);
+
+    auto restorePriority = [originalPriority]() {
+        esp_task_wdt_add(NULL);
+        vTaskPrioritySet(NULL, originalPriority);
+    };
+
+    // Re-teardown WebSocket in case network manager reconnected between calls
+    if (g_unifiedConnectionPtr) {
+        g_unifiedConnectionPtr->teardownGsmWebSocket();
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    // -- Connect --
-    Serial.printf("[OTA_HTTP]    Connecting to %s:%d...\n", host, port);
-    if (!_activeClient->connect(host, port)) {
-        Serial.println("[OTA_HTTP] ERROR: TCP/TLS connect failed");
-        if (_ssl) { delete _ssl; _ssl = nullptr; }
-        _activeClient = nullptr;
-        g_networkManager.setOtaActive(false);
-        if (_onClose) _onClose(MO_FtpCloseReason_Failure);
-        return;
+    // Flush any stale bytes from UART before starting TLS
+    while (GSM_SERIAL.available()) GSM_SERIAL.read();
+
+    // ── 1. Create TLS connection ─────────────────────────────────────────────
+    SSLClient ssl(&g_gsmManager.getClient());
+    ssl.setCACert(_caCert ? _caCert : ISRG_ROOT_X1_CERT);
+
+    Serial.printf("[OTA_GSM] TLS connecting %s:%d...\n", _host, _port);
+    if (!ssl.connect(_host, _port)) {
+        Serial.println("[OTA_GSM] ERROR: TLS connect failed");
+        restorePriority();
+        return false;
     }
-    Serial.println("[OTA_HTTP]    Connected OK");
+    Serial.println("[OTA_GSM] TLS connected");
+    g_healthMonitor.feed();
 
-    // -- Send HTTP GET request --
-    _activeClient->printf("GET %s HTTP/1.1\r\n", path);
-    _activeClient->printf("Host: %s\r\n", host);
-    _activeClient->print("Accept: application/octet-stream\r\n");
-    _activeClient->print("Connection: close\r\n");
-    _activeClient->print("\r\n");
+    // ── 2. Send a SINGLE open-ended HTTP GET for the full remaining file ─────
+    // RTS/CTS hardware flow control will automatically pause the modem during
+    // flash sector erases, so we do NOT need to slice into 4KB/16KB chunks.
+    // The modem's TX is hardware-gated by ESP32 GPIO14 (RTS pin).
+    Serial.printf("[OTA_GSM] GET bytes=%d- (full stream, RTS/CTS active)...\n", _rangeStart);
+    ssl.printf("GET %s HTTP/1.1\r\n", _path);
+    ssl.printf("Host: %s\r\n", _host);
+    ssl.printf("Range: bytes=%d-\r\n", _rangeStart);  // Open-ended: server sends everything
+    ssl.printf("Connection: close\r\n");               // Single request — no keep-alive needed
+    ssl.printf("Accept: application/octet-stream\r\n");
+    ssl.printf("\r\n");
 
-    // -- Read status line: blocking, 10 s max --
-    // (Only the status line is read here; all remaining headers are parsed
-    //  non-blocking in loop() via _parseHeaders().)
-    uint32_t deadline = millis() + 10000;
-    String statusLine;
-    while (millis() < deadline) {
-        if (_activeClient->available()) {
-            char c = _activeClient->read();
-            if (c == '\n') break;
-            if (c != '\r') statusLine += c;
+    // ── 3. Parse HTTP response headers ──────────────────────────────────────
+    int httpStatus = 0;
+    int bodyLength = -1;
+    uint32_t hdrDeadline = millis() + 15000UL;
+
+    while (millis() < hdrDeadline) {
+        g_healthMonitor.feed();
+
+        if (ssl.available()) {
+            String line = ssl.readStringUntil('\n');
+            line.trim();
+
+            if (line.length() == 0) break; // Blank line = end of headers
+
+            if (httpStatus == 0 && line.startsWith("HTTP/")) {
+                int spaceIdx = line.indexOf(' ');
+                if (spaceIdx > 0) httpStatus = line.substring(spaceIdx + 1, spaceIdx + 4).toInt();
+            }
+            if (line.startsWith("Content-Length:")) {
+                bodyLength = line.substring(16).toInt();
+            }
+            if (line.startsWith("Content-Range:") && _contentLength < 0) {
+                int slash = line.lastIndexOf('/');
+                if (slash > 0) _contentLength = line.substring(slash + 1).toInt();
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
-        delay(1);
-    }
-    Serial.printf("[OTA_HTTP]    Status: %s\n", statusLine.c_str());
-
-    if (statusLine.indexOf("200") < 0 && statusLine.indexOf("206") < 0) {
-        Serial.printf("[OTA_HTTP] ERROR: Server returned: %s\n", statusLine.c_str());
-        _activeClient->stop();
-        if (_ssl) { delete _ssl; _ssl = nullptr; }
-        _activeClient = nullptr;
-        g_networkManager.setOtaActive(false);
-        if (_onClose) _onClose(MO_FtpCloseReason_Failure);
-        return;
     }
 
-    _lastDataMs = millis();  // Start stall timer from connection OK
-    _active     = true;
-    Serial.println("[OTA_HTTP] HTTP OK -- streaming body via GSM...");
-}
-
-GsmHttpDownload::~GsmHttpDownload() {
-    g_networkManager.setOtaActive(false);  // also resets _lastActivityTime
-    Serial.println("[OTA_HTTP] Modem slot released (WS reconnect resumed)");
-
-    if (_ssl) {
-        _ssl->stop();
-        delete _ssl;
-        _ssl = nullptr;
-    } else if (_activeClient) {
-        _activeClient->stop();
+    if (httpStatus != 200 && httpStatus != 206) {
+        Serial.printf("[OTA_GSM] ERROR: Bad HTTP status %d\n", httpStatus);
+        ssl.stop();
+        restorePriority();
+        return false;
     }
-    _activeClient = nullptr;
-}
+    if (bodyLength <= 0) {
+        Serial.printf("[OTA_GSM] ERROR: No Content-Length in response\n");
+        ssl.stop();
+        restorePriority();
+        return false;
+    }
 
-// ---------------------------------------------------------------------------
-// _parseHeaders()
-// Non-blocking: reads one character at a time using the member _line buffer.
-// Returns true when the blank line (end-of-headers) is found.
-// BUG FIX: was a static local — now a member variable so each instance is clean.
-// ---------------------------------------------------------------------------
-bool GsmHttpDownload::_parseHeaders() {
-    if (!_activeClient) return false;
+    Serial.printf("[OTA_GSM] Streaming %d bytes → flash (RTS/CTS hardware throttle active)...\n", bodyLength);
 
-    while (_activeClient->available()) {
-        char c = _activeClient->read();
-        if (c == '\n') {
-            // Strip trailing \r
-            if (_line.length() > 0 && _line[_line.length()-1] == '\r') {
-                _line.remove(_line.length()-1);
+    // ── 4. Stream the full body directly to flash ────────────────────────────
+    // RTS/CTS hardware pauses the modem automatically during flash erases.
+    // No software slicing needed. Just read bytes as fast as they arrive.
+    int totalRead = 0;
+    int bufPos    = 0;
+    // 5-minute deadline for the entire file (1.4MB at 11KB/s ≈ 2 min, give 3x margin)
+    uint32_t bodyDeadline = millis() + 300000UL;
+
+    while (totalRead < bodyLength && millis() < bodyDeadline) {
+        g_healthMonitor.feed();
+
+        if (ssl.available()) {
+            _buf[bufPos++] = (uint8_t)ssl.read();
+            totalRead++;
+
+            if (bufPos == CHUNK || totalRead == bodyLength) {
+                size_t consumed = _writer(_buf, bufPos);
+                if (consumed == 0) {
+                    Serial.println("[OTA_GSM] ERROR: OTA writer aborted");
+                    ssl.stop();
+                    restorePriority();
+                    return false;
+                }
+                _bytesReceived += (int)consumed;
+                _rangeStart    += (int)consumed;
+                _lastDataMs     = millis();
+                bufPos = 0;
+                vTaskDelay(pdMS_TO_TICKS(5)); // Yield to FreeRTOS
             }
-            if (_line.length() == 0) {
-                // Blank line = end of headers
-                Serial.printf("[OTA_HTTP] Headers parsed. Content-Length: %d bytes\n",
-                              _contentLength);
-                _headersParsed = true;
-                return true;
-            }
-            // Extract Content-Length
-            if (_line.startsWith("Content-Length:") ||
-                _line.startsWith("content-length:")) {
-                _contentLength = _line.substring(_line.indexOf(':') + 1).toInt();
-            }
-            _line = "";  // Ready for next header line
-        } else if (c != '\r') {
-            _line += c;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(5)); // Yield when stream momentarily idle
         }
     }
-    return false;
-}
 
-// ---------------------------------------------------------------------------
-// loop() — called every mocpp_loop() tick while download is in progress.
-// ---------------------------------------------------------------------------
-void GsmHttpDownload::loop() {
-    if (!_active) return;
-
-    if (!_activeClient) {
-        Serial.println("[OTA_HTTP] ERROR: Client lost mid-download");
-        _active = false;
-        if (_onClose) _onClose(MO_FtpCloseReason_Failure);
-        return;
+    if (totalRead < bodyLength) {
+        Serial.printf("[OTA_GSM] ERROR: Stream ended early: %d/%d bytes\n", totalRead, bodyLength);
+        ssl.stop();
+        restorePriority();
+        return false;
     }
 
+    // Mark complete
+    _contentLength = _bytesReceived;
+    Serial.printf("[OTA_GSM] ✅ All %d bytes written to flash!\n", _bytesReceived);
+
+    ssl.stop();
+    restorePriority();
+    return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// _stream() — Called every loop() tick in STREAMING state.
+//             Downloads one range slice per call (blocking but yields internally).
+// ---------------------------------------------------------------------------
+void NativeGsmHttpDownload::_stream() {
     uint32_t now = millis();
 
-    // -- Periodic WDT feed (every 5 s) --
-    // Hardware WDT is 60 s; feeding every 5 s gives ample headroom even if
-    // the GSM stream stalls between TLS records.
-    if (now - _lastWdtFeed >= 5000) {
-        g_healthMonitor.feed();
-        _lastWdtFeed = now;
-    }
-
-    // -- Stall timeout --
-    // If no data has arrived for OTA_STALL_TIMEOUT_MS, the TLS stream is
-    // irrecoverably stuck. Fail cleanly so MicroOcpp can retry.
-    if (now - _lastDataMs >= OTA_STALL_TIMEOUT_MS) {
-        Serial.printf("[OTA_HTTP] ERROR: GSM stall — no data for %lu s. Aborting.\n",
+    // Stall timeout (2 minutes of no data)
+    if (now - _lastDataMs >= STALL_TIMEOUT_MS) {
+        Serial.printf("[OTA_GSM] ERROR: Stall timeout (%lus). Aborting.\n",
                       (unsigned long)(now - _lastDataMs) / 1000);
-        _active = false;
-        _activeClient->stop();
-        if (_onClose) _onClose(MO_FtpCloseReason_Failure);
+        _finish(MO_FtpCloseReason_Failure);
         return;
     }
 
-    // -- Phase 1: Parse remaining HTTP headers (non-blocking) --
-    if (!_headersParsed) {
-        _parseHeaders();   // Reads all chars currently available
-        // Reset stall timer — receiving headers counts as activity
-        if (_activeClient->available() || g_gsmManager.getClient().available()) {
-            _lastDataMs = now;
-        }
-        return;
-    }
-
-    // -- Phase 2: Drain and detect connection close --
-    // IMPORTANT: always drain available bytes BEFORE checking connected().
-    // SSLClient may report !connected() after the server sends FIN, but there
-    // may still be buffered plaintext to read.
-
-    // -- Phase 3: Read body data --
-    // SSLClient::available() can return 0 even when ciphertext is waiting in
-    // the underlying TinyGsmClient, because it only reports DECRYPTED bytes.
-    // If SSLClient says 0 but TinyGsmClient has raw bytes, force a read to
-    // pump the TLS decryptor.
-    int avail = _activeClient->available();
-    if (avail == 0 && _ssl) {
-        // Check raw modem buffer
-        int rawAvail = g_gsmManager.getClient().available();
-        if (rawAvail > 0) {
-            // Force SSLClient to decrypt the pending TLS record.
-            // readBytes(1) will consume the full TLS record internally
-            // and make the decrypted bytes available on the next call.
-            uint8_t tmp;
-            int got = _activeClient->readBytes(&tmp, 1);
-            if (got > 0) {
-                // Got first byte — pass it to the writer and continue
-                _lastDataMs = now;
-                g_healthMonitor.feed();
-                _lastWdtFeed = now;
-                size_t consumed = _writer(&tmp, 1);
-                if (consumed == 0) {
-                    Serial.println("[OTA_HTTP] ERROR: OTA writer aborted (GSM)");
-                    _active = false;
-                    _activeClient->stop();
-                    if (_onClose) _onClose(MO_FtpCloseReason_Failure);
-                    return;
-                }
-                _bytesReceived += 1;
-            }
-            // Re-query — decryptor may have buffered more plaintext now
-            avail = _activeClient->available();
-        }
-    }
-
-    if (avail <= 0) {
-        // No decrypted data yet. Check for clean EOF.
-        if (!_activeClient->connected() && _activeClient->available() == 0) {
-            if (_contentLength < 0 || _bytesReceived >= _contentLength) {
-                Serial.printf("[OTA_HTTP] GSM download complete: %d bytes\n",
-                              _bytesReceived);
-                _active = false;
-                if (_onClose) _onClose(MO_FtpCloseReason_Success);
-            } else {
-                Serial.printf("[OTA_HTTP] ERROR: GSM lost at %d/%d bytes\n",
-                              _bytesReceived, _contentLength);
-                _active = false;
-                if (_onClose) _onClose(MO_FtpCloseReason_Failure);
-            }
-        }
-        return;
-    }
-
-    // Read one chunk of decrypted plaintext
-    size_t toRead = min((size_t)avail, CHUNK);
-    size_t read   = _activeClient->readBytes(_buf, toRead);
-    if (read == 0) return;
-
-    _lastDataMs = now;       // Data received — reset stall timer
-    g_healthMonitor.feed();  // Feed WDT on every chunk
-    _lastWdtFeed = now;
-
-    size_t consumed = _writer(_buf, read);
-    if (consumed == 0) {
-        Serial.println("[OTA_HTTP] ERROR: OTA writer aborted (GSM)");
-        _active = false;
-        _activeClient->stop();
-        if (_onClose) _onClose(MO_FtpCloseReason_Failure);
-        return;
-    }
-
-    _bytesReceived += (int)read;
-
-    // Progress log every 64 KB
-    if ((_bytesReceived % 65536) < (int)read) {
-        if (_contentLength > 0) {
-            Serial.printf("[OTA_HTTP] GSM progress: %d / %d (%.1f%%)\n",
-                          _bytesReceived, _contentLength,
-                          100.0f * _bytesReceived / _contentLength);
-        } else {
-            Serial.printf("[OTA_HTTP] GSM progress: %d bytes\n", _bytesReceived);
-        }
-    }
-
-    // Completion by Content-Length
+    // Check completion
     if (_contentLength > 0 && _bytesReceived >= _contentLength) {
-        Serial.printf("[OTA_HTTP] GSM download complete: %d bytes\n", _bytesReceived);
-        _active = false;
-        if (_onClose) _onClose(MO_FtpCloseReason_Success);
+        Serial.printf("[OTA_GSM] ✅ All %d bytes written to flash!\n", _bytesReceived);
+        _finish(MO_FtpCloseReason_Success);
+        return;
+    }
+
+    // Download the next range slice
+    if (!_downloadRange()) {
+        Serial.println("[OTA_GSM] ERROR: Range download failed");
+        _finish(MO_FtpCloseReason_Failure);
+        return;
+    }
+
+    if (_contentLength > 0) {
+        Serial.printf("[OTA_GSM] Progress: %d / %d (%.1f%%)\n",
+                      _bytesReceived, _contentLength,
+                      100.0f * _bytesReceived / _contentLength);
+    } else {
+        Serial.printf("[OTA_GSM] Progress: %d bytes...\n", _bytesReceived);
     }
 }
 
+// ---------------------------------------------------------------------------
+// loop() — called every mocpp_loop() tick
+// ---------------------------------------------------------------------------
+void NativeGsmHttpDownload::loop() {
+    if (!_active) return;
+
+    switch (_state) {
+        case State::SETUP:
+            if (_setup()) {
+                _state = State::STREAMING;
+            } else {
+                Serial.println("[OTA_GSM] ERROR: Setup failed");
+                _finish(MO_FtpCloseReason_Failure);
+            }
+            break;
+
+        case State::STREAMING:
+            _stream();
+            break;
+
+        case State::DONE:
+            break;
+    }
+}
+//
 // =============================================================================
-// HttpOtaClient — FtpClient dispatch (WiFi-first, GSM fallback)
+// HttpOtaClient — FtpClient dispatch (WiFi-first, native GSM fallback)
 // =============================================================================
 
 std::unique_ptr<MicroOcpp::FtpDownload> HttpOtaClient::getFile(
@@ -464,13 +467,8 @@ std::unique_ptr<MicroOcpp::FtpDownload> HttpOtaClient::getFile(
     std::function<void(MO_FtpCloseReason)>        onClose,
     const char* /*ca_cert*/)
 {
-    // ── STRATEGY: Always try WiFi first ──────────────────────────────────────
-    // The A7670 modem can only hold one TLS session reliably. If we try to run
-    // OTA over GSM while the OCPP WebSocket is also using the modem, we get:
-    //   MBEDTLS_ERR_SSL_INVALID_MAC
-    // WiFi uses a completely independent TLS stack — zero collision possible.
-    //
-    // Wrap onClose so WiFi radio is released after both success AND failure.
+    // ── STRATEGY: Try WiFi first ──────────────────────────────────────────────
+    // WiFi uses a completely independent TLS stack — zero collision with GSM WS.
     auto wrappedOnClose = [onClose](MO_FtpCloseReason reason) {
         g_networkManager.releaseWiFiAfterOta();
         if (onClose) onClose(reason);
@@ -478,17 +476,24 @@ std::unique_ptr<MicroOcpp::FtpDownload> HttpOtaClient::getFile(
 
     if (g_networkManager.requestWiFiForOta()) {
         Serial.println("[OTA_HTTP] ✅ Using WiFi transport (collision-free)");
+        
+        // CRITICAL: ESP32 does not have enough RAM to run TWO software TLS stacks
+        // (WiFiClientSecure for OTA + SSLClient for GSM WebSocket). We must kill 
+        // the GSM WebSocket to free up ~25KB of RAM so Update.begin() doesn't fail.
+        if (g_unifiedConnectionPtr) {
+            g_unifiedConnectionPtr->teardownGsmWebSocket();
+        }
+
         return std::unique_ptr<WifiHttpDownload>(
             new WifiHttpDownload(url, writer, wrappedOnClose, _caCert));
     }
 
-    // ── FALLBACK: GSM ─────────────────────────────────────────────────────────
-    // WiFi unavailable (no credentials or out of range). Try GSM.
-    // Note: This may still fail due to modem TLS limits, but we try anyway.
-    Serial.println("[OTA_HTTP] ⚠️  WiFi unavailable — falling back to GSM transport");
-    Serial.println("[OTA_HTTP]    (If this fails with MAC error, ensure WiFi credentials are provisioned)");
-    return std::unique_ptr<GsmHttpDownload>(
-        new GsmHttpDownload(url, writer, onClose, _caCert));
+    // ── FALLBACK: Native GSM HTTPS ────────────────────────────────────────────
+    // WiFi unavailable. Use A7670's built-in HTTPS engine.
+    // TLS runs inside the modem — no MAC errors, no WS teardown needed.
+    Serial.println("[OTA_HTTP] ⚠️  WiFi unavailable — using Native GSM HTTPS transport");
+    return std::unique_ptr<NativeGsmHttpDownload>(
+        new NativeGsmHttpDownload(url, writer, onClose, _caCert));
 }
 
 } // namespace prod

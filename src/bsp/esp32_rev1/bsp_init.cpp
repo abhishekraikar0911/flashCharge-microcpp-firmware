@@ -126,7 +126,9 @@ bool BSP_Init() {
     }
 
     // ---- Step 6: GSM UART ----
-    s_modemUart.begin(GSM_BAUD_RATE);
+    // Boot at factory default (115200). GsmManager::stepModemReady() will
+    // shift to GSM_HIGH_BAUD (460800) via AT+IPR after the modem is awake.
+    s_modemUart.begin(GSM_BOOT_BAUD);
 
     // ---- Step 7: Relay ----
     s_relay.init();
