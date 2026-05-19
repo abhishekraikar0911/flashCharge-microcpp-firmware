@@ -31,6 +31,7 @@ Key Logic: It includes a "GSM Teardown" feature. When a download starts over GSM
 #include "services/ocpp/OcppConnectionHelper.h"
 #include <esp_task_wdt.h>
 #include <Arduino.h>
+#include "system/state/SystemState.h"
 
 namespace prod {
 
@@ -232,6 +233,8 @@ bool NativeGsmHttpDownload::_setup() {
 
     // Tear down WebSocket — frees the shared TinyGsmClient channel for OTA
     if (g_unifiedConnectionPtr) {
+        Serial.println("[OTA_GSM] ⏳ Flushing OCPP queue (3 seconds) before taking over modem...");
+        vTaskDelay(pdMS_TO_TICKS(3000)); // Let MicroOcpp send the 'Downloading' notification
         Serial.println("[OTA_GSM] Releasing OCPP WebSocket for OTA use...");
         g_unifiedConnectionPtr->teardownGsmWebSocket();
         vTaskDelay(pdMS_TO_TICKS(2000)); // Let modem fully close TCP
@@ -242,7 +245,7 @@ bool NativeGsmHttpDownload::_setup() {
     _rangeStart    = 0;
     _lastDataMs    = millis();
 
-    Serial.println("[OTA_GSM] Setup OK — downloading in 60KB slices via SSLClient...");
+  //  Serial.println("[OTA_GSM] Setup OK — downloading in 60KB slices via SSLClient...");
     return true;
 }
 
@@ -458,7 +461,7 @@ void NativeGsmHttpDownload::loop() {
 }
 //
 // =============================================================================
-// HttpOtaClient — FtpClient dispatch (WiFi-first, native GSM fallback)
+// HttpOtaClient — FtpClient dispatch (GSM primary, WiFi fallback)
 // =============================================================================
 
 std::unique_ptr<MicroOcpp::FtpDownload> HttpOtaClient::getFile(
@@ -467,19 +470,39 @@ std::unique_ptr<MicroOcpp::FtpDownload> HttpOtaClient::getFile(
     std::function<void(MO_FtpCloseReason)>        onClose,
     const char* /*ca_cert*/)
 {
-    // ── STRATEGY: Try WiFi first ──────────────────────────────────────────────
-    // WiFi uses a completely independent TLS stack — zero collision with GSM WS.
+    // STAGE 1 FAILSAFE: Prevent Download During Active Charging
+    if (SystemState::instance().getTransactionActive()) {
+        Serial.println("[OTA_HTTP] ❌ OTA REJECTED: A charging session is currently active. Safety lock engaged.");
+        if (onClose) onClose(MO_FtpCloseReason_Failure);
+        return nullptr;
+    }
+
+    // ── STRATEGY 1: GSM Primary ───────────────────────────────────────────────
+    // With RTS/CTS hardware flow control + 460800 baud, GSM OTA now completes
+    // 1.4MB in ~90 seconds — faster and simpler than waking up the WiFi radio.
+    // NativeGsmHttpDownload manages its own socket lifecycle internally.
+    if (g_gsmManager.isConnected()) {
+        Serial.println("[OTA_HTTP] ✅ GSM connected — using GSM transport (Primary)");
+        return std::unique_ptr<NativeGsmHttpDownload>(
+            new NativeGsmHttpDownload(url, writer, onClose, _caCert));
+    }
+
+    // ── STRATEGY 2: WiFi Fallback ─────────────────────────────────────────────
+    // GSM is offline (device running entirely on WiFi fallback, or modem failure).
+    // Attempt to bring up the WiFi radio specifically for this OTA download.
+    Serial.println("[OTA_HTTP] ⚠️  GSM offline — attempting WiFi fallback for OTA...");
+
     auto wrappedOnClose = [onClose](MO_FtpCloseReason reason) {
         g_networkManager.releaseWiFiAfterOta();
         if (onClose) onClose(reason);
     };
 
     if (g_networkManager.requestWiFiForOta()) {
-        Serial.println("[OTA_HTTP] ✅ Using WiFi transport (collision-free)");
-        
-        // CRITICAL: ESP32 does not have enough RAM to run TWO software TLS stacks
-        // (WiFiClientSecure for OTA + SSLClient for GSM WebSocket). We must kill 
-        // the GSM WebSocket to free up ~25KB of RAM so Update.begin() doesn't fail.
+        Serial.println("[OTA_HTTP] ✅ WiFi fallback ready — using WiFi transport");
+
+        // CRITICAL: ESP32 does not have enough RAM to run two software TLS stacks
+        // simultaneously (WiFiClientSecure for OTA + SSLClient for GSM WebSocket).
+        // Tear down the GSM WebSocket to free ~25KB before WiFi OTA starts.
         if (g_unifiedConnectionPtr) {
             g_unifiedConnectionPtr->teardownGsmWebSocket();
         }
@@ -488,12 +511,10 @@ std::unique_ptr<MicroOcpp::FtpDownload> HttpOtaClient::getFile(
             new WifiHttpDownload(url, writer, wrappedOnClose, _caCert));
     }
 
-    // ── FALLBACK: Native GSM HTTPS ────────────────────────────────────────────
-    // WiFi unavailable. Use A7670's built-in HTTPS engine.
-    // TLS runs inside the modem — no MAC errors, no WS teardown needed.
-    Serial.println("[OTA_HTTP] ⚠️  WiFi unavailable — using Native GSM HTTPS transport");
-    return std::unique_ptr<NativeGsmHttpDownload>(
-        new NativeGsmHttpDownload(url, writer, onClose, _caCert));
+    // ── No transport available ─────────────────────────────────────────────────
+    Serial.println("[OTA_HTTP] ❌ No transport available (GSM offline, WiFi failed) — OTA aborted");
+    if (onClose) onClose(MO_FtpCloseReason_Failure);
+    return nullptr;
 }
 
 } // namespace prod

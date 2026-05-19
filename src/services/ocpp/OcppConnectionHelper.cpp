@@ -123,10 +123,14 @@ namespace prod {
             return;
         }
 
-        // OTA GUARD: Native GSM OTA no longer requires tearing down the
-        // WebSocket because the modem handles the HTTPS TLS internally.
-        // We let the OCPP WebSocket stay alive during the download.
-        // if (g_networkManager.isOtaActive()) { ... }
+        // OTA GUARD: OTA download owns the modem slot.
+        // CRITICAL: also destroy the WS SSLClient here so OTA gets a clean,
+        // unshared TinyGsmClient. Without this, both SSLClient objects reference
+        // the same modem slot simultaneously → NGINX fatal TLS alert or backend crash.
+        if (g_networkManager.isOtaActive()) {
+            teardownGsmWebSocket();
+            return;
+        }
 
 
         if (!_sslClient) {
@@ -309,7 +313,8 @@ namespace prod {
         headerSize += 4; // Mask key (mandatory for client -> server)
         
         size_t totalSize = headerSize + length;
-        if (totalSize > 2048) {
+        // Increased from 2048 to 8192 to support large StopTransaction payloads
+        if (totalSize > 8192) {
             Serial.printf("[WS_GSM] ❌ Frame too large (%u bytes)\n", totalSize);
             return false;
         }

@@ -518,6 +518,12 @@ bool ocpp::init()
             
             // Allow MicroOcpp to transition to "Installing" before rebooting
             fwService->setOnInstall([](const char* location) -> bool {
+                // STAGE 2 FAILSAFE: Prevent Reboot While Plugged In
+                if (SystemState::instance().getGunPhysicallyConnected() || SystemState::instance().getTransactionActive()) {
+                    Serial.println("[OTA] ❌ INSTALLATION REJECTED: Vehicle is plugged in or charging. Safety lock engaged.");
+                    return false; // Tells MicroOcpp to abort the install phase
+                }
+
                 if (prod::OTAManager::isUpdateValid()) {
                     Serial.println("[OTA] ⏳ MicroOcpp queued 'Installing'. Rebooting in 20 seconds to allow status flush...");
                     xTaskCreate([](void* pvParameters) {
