@@ -32,6 +32,7 @@ public:
     bool  isSafeToCharge() override;
     bool  isConnected() override;
     uint32_t getLastMessageAgeMs() override;
+    bool  isHardwareHealthy() override;
 
     /**
      * Call this periodically to process incoming CAN frames from the queue.

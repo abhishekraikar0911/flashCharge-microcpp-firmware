@@ -36,6 +36,9 @@ public:
     /** @return Milliseconds since the last valid telemetry frame was received */
     virtual uint32_t getLastMessageAgeMs() = 0;
 
+    /** @return true if the underlying hardware controller (e.g. CAN chip) is healthy */
+    virtual bool isHardwareHealthy() = 0;
+
     /**
      * Periodic driver tick — must be called from the application loop.
      * Handles: CAN RX queue draining, telemetry decoding.

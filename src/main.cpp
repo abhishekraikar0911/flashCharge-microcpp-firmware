@@ -8,14 +8,14 @@
 
 void setup()
 {
-    Serial.begin(115200);
+    Serial.begin(115200); // 1. start Serial for debugging
 
-    prod::g_healthMonitor.init();
+    prod::g_healthMonitor.init(); // 2. Initialize the system health and WDT
 
     Serial.println("[Boot] Waiting 10s for hardware power rails to stabilize...");
     for (int i = 0; i < 100; i++) 
     {
-        prod::g_healthMonitor.feed();
+        prod::g_healthMonitor.feed(); //feeding WDT to stop it from resetting
         delay(100);
     }
 
@@ -33,6 +33,7 @@ void setup()
         static size_t logLen = 0;
         static uint32_t lastUninitWarn = 0;
 
+        //buffer overflow check
         // Append fragment — guard against overflow by clamping to buffer capacity
         size_t msgLen = strlen(msg);
         if (logLen + msgLen >= sizeof(logBuffer) - 1) {
@@ -72,15 +73,15 @@ void setup()
     });
 
     // Launch the Application Orchestrator
-    prod::ChargePoint::instance().boot();
+    prod::ChargePoint::instance().boot(); //register multiple independent functions,
     
-    DebugLogger::init();
-    DebugLogger::printMenu();
+    DebugLogger::init(); //Initializes debug console with all the function 
+    DebugLogger::printMenu(); //prints menu 
 }
 
 void loop()
 {
-    prod::g_healthMonitor.feed();
-    prod::g_healthMonitor.poll();
+    prod::g_healthMonitor.feed(); //feeding WDT to stop it from resetting
+    prod::g_healthMonitor.poll();   
     vTaskDelay(pdMS_TO_TICKS(100));
 }

@@ -215,3 +215,7 @@ uint32_t DalyBmsDriver::getLastMessageAgeMs() {
     if (now >= lastMessageTimeMs) return now - lastMessageTimeMs;
     return (0xFFFFFFFF - lastMessageTimeMs) + now + 1; // millis() overflow safe
 }
+
+bool DalyBmsDriver::isHardwareHealthy() {
+    return can.isHealthy();
+}

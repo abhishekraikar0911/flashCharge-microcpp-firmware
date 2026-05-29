@@ -375,6 +375,20 @@ bool ocpp::init()
         return MicroOcpp::ErrorData(nullptr);
     });
 
+    // 3b. BMS CAN Controller Hardware Fault (MCP2515)
+    // Triggers instantly if the CAN chip dies or goes Bus-Off, even while idle.
+    addErrorDataInput([]() -> MicroOcpp::ErrorData {
+        if (g_app.bms && !g_app.bms->isHardwareHealthy()) {
+            MicroOcpp::ErrorData err("InternalError");
+            err.info = "MCP2515 CAN Controller Hardware Fault / Bus-Off";
+            err.vendorId = "RivotMotors";
+            err.vendorErrorCode = "E_CAN2_FAULT";
+            return err;
+        }
+        return MicroOcpp::ErrorData(nullptr);
+    });
+
+
     // 4. HAL v1 STEP 3: Charger Module Fault via g_app.charger->hasFault()
     // Replaces legacy isChargerModuleHealthy() call.
     // CM1ChargerDriver reports hasFault()=true if telemetry hasn't been
