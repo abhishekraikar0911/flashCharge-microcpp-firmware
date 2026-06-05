@@ -55,6 +55,19 @@ namespace SecureCredentials
         }
 
         /**
+         * @brief Safely close NVS storage to commit journal
+         */
+        void close()
+        {
+            if (initialized)
+            {
+                prefs.end();
+                initialized = false;
+                Serial.println("[SECURITY] 🔒 Secure storage safely closed");
+            }
+        }
+
+        /**
          * @brief Store WiFi credentials securely
          * @param ssid WiFi SSID
          * @param password WiFi password
@@ -80,6 +93,9 @@ namespace SecureCredentials
         bool getWiFiCredentials(char *ssid, char *password, size_t ssidLen, size_t passLen)
         {
             if (!initialized && !init())
+                return false;
+
+            if (!prefs.isKey("wifi_ssid") || !prefs.isKey("wifi_pass"))
                 return false;
 
             String s = prefs.getString("wifi_ssid", "");
@@ -126,6 +142,9 @@ namespace SecureCredentials
                                 size_t hostLen, size_t idLen)
         {
             if (!initialized && !init())
+                return false;
+
+            if (!prefs.isKey("ocpp_host") || !prefs.isKey("charger_id"))
                 return false;
 
             String h = prefs.getString("ocpp_host", "");

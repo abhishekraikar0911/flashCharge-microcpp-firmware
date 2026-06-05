@@ -19,7 +19,7 @@ void ChargerService::poll() {
     uint32_t now = g_app.timer ? g_app.timer->millis() : 0;
     auto snap = SystemState::instance().snapshot(); // Take snapshot once at top
     static uint32_t lastDiagLog = 0;
-    bool shouldLog = (now - lastDiagLog > 5000);
+    bool shouldLog = (now - lastDiagLog > 30000);  // 30s — reduced from 5s to avoid serial spam
     if (shouldLog) {
         lastDiagLog = now;
         uint32_t bmsAge = (snap.lastBMS > 0) ? (now - snap.lastBMS) : 99999u;

@@ -73,6 +73,11 @@ public:
         Serial.println("6 - System");
         Serial.println("0 - Debug ALL");
         Serial.println("9 - Stop Debug");
+        Serial.println("s - Local START session");
+        Serial.println("t - Local STOP session");
+        Serial.println("--------------------------------");
+        Serial.println("i - Show current NVS identity");
+        Serial.println("r - Re-provision (change Charger ID)");
         Serial.println("================================\n");
     }
     

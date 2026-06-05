@@ -16,6 +16,10 @@
 #include "services/safety/HealthMonitor.h"
 #include <Arduino.h>
 #include <driver/uart.h>  // ESP-IDF UART driver — needed for uart_set_hw_flow_ctrl()
+#include "system/SafeSerial.h"
+
+// Override Serial to automatically suppress all logs when provisioning wizard is active
+#define Serial SafeSerial::SafeSerialObj
 
 namespace prod {
 
@@ -86,12 +90,16 @@ GsmError GSMManager::connect(uint32_t networkTimeoutMs) {
         return GsmError::FAIL_FATAL_MODEM;
     }
 
-    Serial.println("[GSM] 🔄 Starting modem connection sequence...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[GSM] 🔄 Starting modem connection sequence...");
+    }
 
     // CRITICAL FIX: If we were previously connected or in error,
     // tear down old GPRS session to ensure clean PDP context.
     if (_state >= GSMState::DATA_ATTACHED || _state == GSMState::ERROR) {
-        Serial.println("[GSM] 🧹 Cleaning up old GPRS session before reconnect...");
+        if (!SafeSerial::isSuppressed()) {
+            Serial.println("[GSM] 🧹 Cleaning up old GPRS session before reconnect...");
+        }
         _modem.gprsDisconnect();
         delay(1000); // Allow modem to settle
     }
@@ -122,7 +130,9 @@ GsmError GSMManager::connect(uint32_t networkTimeoutMs) {
 
 bool GSMManager::stepBoot() {
     setState(GSMState::MODEM_BOOT);
-    Serial.printf("[GSM] 🔌 Step 1/6: Booting modem... (Heap: %u)\n", ESP.getFreeHeap());
+    if (!SafeSerial::isSuppressed()) {
+        Serial.printf("[GSM] 🔌 Step 1/6: Booting modem... (Heap: %u)\n", ESP.getFreeHeap());
+    }
 
     // ── Phase 1: Try boot baud (115200) ─────────────────────────────────────
     // Normal case: modem is freshly powered or already at factory default baud.
@@ -135,8 +145,10 @@ bool GSMManager::stepBoot() {
     // The A7670 saves AT+IPR baud setting to its own flash. If the previous
     // session shifted to 460800, the modem boots at that speed on next power-on.
     // We need to detect this, reset it to 115200, then continue normally.
-    Serial.printf("[GSM] 🔍 No response at %d — probing %d (sticky AT+IPR?)...\n",
-                  GSM_BOOT_BAUD, GSM_HIGH_BAUD);
+    if (!SafeSerial::isSuppressed()) {
+        Serial.printf("[GSM] 🔍 No response at %d — probing %d (sticky AT+IPR?)...\n",
+                      GSM_BOOT_BAUD, GSM_HIGH_BAUD);
+    }
     GSM_SERIAL.begin(GSM_HIGH_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
     delay(50);
 
@@ -163,11 +175,15 @@ bool GSMManager::stepBoot() {
     }
 
     // ── Phase 3: Hard reset ──────────────────────────────────────────────────
-    Serial.println("[GSM] 🔄 Modem silent at all baud rates — hardware RESET...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[GSM] 🔄 Modem silent at all baud rates — hardware RESET...");
+    }
     hardReset();
 
     if (!waitForAT(30000)) {
-        Serial.println("[GSM] ❌ Modem did not respond after hard reset");
+        if (!SafeSerial::isSuppressed()) {
+            Serial.println("[GSM] ❌ Modem did not respond after hard reset");
+        }
         setState(GSMState::ERROR);
         return false;
     }
@@ -418,7 +434,9 @@ void GSMManager::hardReset() {
     // A7670C Power-ON/RESET: Active HIGH
     // For many A7670C breakout boards, a 100ms-500ms pulse on RESET triggers power-up.
     // 2.5s might be triggering a "Force Shutdown" or brownout.
-    Serial.println("[GSM] 🔄 Sending Power-ON pulse (400ms)...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[GSM] 🔄 Sending Power-ON pulse (400ms)...");
+    }
 
     digitalWrite(GSM_RESET_PIN, HIGH);
     delay(400); 
@@ -427,7 +445,9 @@ void GSMManager::hardReset() {
     g_healthMonitor.feed();
 
     // Wait for power stabilization and boot
-    Serial.println("[GSM] ⏳ Waiting 10s for modem stabilization...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[GSM] ⏳ Waiting 10s for modem stabilization...");
+    }
     for (int i=0; i<10; i++) {
         delay(1000);
         g_healthMonitor.feed();
@@ -435,14 +455,18 @@ void GSMManager::hardReset() {
 }
 
 bool GSMManager::softReset() {
-    Serial.println("[GSM] 🔄 Soft reset via AT command...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[GSM] 🔄 Soft reset via AT command...");
+    }
 
     g_healthMonitor.feed(); // Feed before long wait
     _modem.sendAT("+CRESET");
     int res = _modem.waitResponse(10000);
 
     if (res != 1) {
-        Serial.println("[GSM] ⚠️  Soft reset command failed");
+        if (!SafeSerial::isSuppressed()) {
+            Serial.println("[GSM] ⚠️  Soft reset command failed");
+        }
         return false;
     }
 
@@ -515,7 +539,9 @@ bool GSMManager::waitForAT(uint32_t timeoutMs) {
 
 void GSMManager::setState(GSMState newState) {
     if (_state != newState) {
-        Serial.printf("[GSM] State: %s → %s\n", gsmStateToString(_state), gsmStateToString(newState));
+        if (!SafeSerial::isSuppressed()) {
+            Serial.printf("[GSM] State: %s → %s\n", gsmStateToString(_state), gsmStateToString(newState));
+        }
         _state = newState;
     }
 }

@@ -7,8 +7,6 @@
  * @date 2026
  */
 
-#include <Arduino.h>
-
 // ========== CAN BUS CONFIGURATION ==========
 // CAN1 - ISO1050 (TWAI) - Charger Module
 #define CAN1_TX_PIN GPIO_NUM_21

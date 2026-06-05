@@ -1,4 +1,5 @@
 #include "hal/esp32/Esp32Can.h"
+#include "system/SafeSerial.h"
 #include <Arduino.h>
 
 Esp32Can::Esp32Can(int txPin, int rxPin, int rxQueue, int txQueue)
@@ -62,8 +63,8 @@ bool Esp32Can::send(const CanFrame& frame) {
         twai_status_info_t status;
         twai_get_status_info(&status);
         if (status.state == TWAI_STATE_BUS_OFF) {
-            Serial.println("[HAL_CAN1] ⚠️  Bus-Off detected — Triggering reset...");
-            xSemaphoreGive(mutex); // Give it before calling reset() which takes it
+            SafeSerial::println("[HAL_CAN1] ⚠️  Bus-Off detected — Triggering reset...");
+            xSemaphoreGive(mutex);
             reset();
             return false;
         }
@@ -71,9 +72,9 @@ bool Esp32Can::send(const CanFrame& frame) {
 
     static uint32_t lastTxLog = 0;
     uint32_t now = millis();
-    if (err != ESP_OK && now - lastTxLog > 5000) {
+    if (err != ESP_OK && now - lastTxLog > 10000) {  // 10s — WARN/ERROR, needs prompt visibility
         lastTxLog = now;
-        Serial.printf("[HAL_CAN1] TX FAIL id=0x%08lX err=0x%X\n", (long unsigned int)frame.id, err);
+        SafeSerial::printf("[HAL_CAN1] TX FAIL id=0x%08lX err=0x%X\n", (long unsigned int)frame.id, err);
     }
 
     xSemaphoreGive(mutex);
@@ -107,11 +108,11 @@ bool Esp32Can::receive(CanFrame& frame) {
             lastErrLog = now;
             twai_status_info_t status;
             twai_get_status_info(&status);
-            Serial.printf("[HAL_CAN1] RX ERR: 0x%X | State: %d | TX_Err: %u | RX_Err: %u\n", 
+            SafeSerial::printf("[HAL_CAN1] RX ERR: 0x%X | State: %d | TX_Err: %u | RX_Err: %u\n",
                           err, status.state, status.tx_error_counter, status.rx_error_counter);
-            
+
             if (status.state == TWAI_STATE_BUS_OFF) {
-                Serial.println("[HAL_CAN1] 🚨 Bus-Off in RX loop — Triggering recovery...");
+                SafeSerial::println("[HAL_CAN1] 🚨 Bus-Off in RX loop — Triggering recovery...");
                 xSemaphoreGive(mutex);
                 reset();
                 return false;
@@ -135,7 +136,7 @@ bool Esp32Can::isHealthy() {
 void Esp32Can::reset() {
     if (xSemaphoreTake(mutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
     
-    Serial.println("[HAL_CAN1] 🔄 Reinstalling TWAI Driver...");
+    SafeSerial::println("[HAL_CAN1] 🔄 Reinstalling TWAI Driver...");
     twai_stop();
     twai_driver_uninstall();
     

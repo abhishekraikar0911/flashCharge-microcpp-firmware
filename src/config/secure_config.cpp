@@ -7,9 +7,20 @@ namespace SecureConfig
     // Migration flag to track if legacy secrets have been migrated
     static const char* MIGRATION_KEY = "migration_done";
     
+    // ╔══════════════════════════════════════════════════════════════════╗
+    // ║  DEPRECATED — DO NOT CALL THIS FUNCTION ON NEW DEVICES          ║
+    // ║                                                                  ║
+    // ║  This function was used to migrate hardcoded credentials from    ║
+    // ║  the old secrets.h file into NVS during the early development    ║
+    // ║  phase. It is now replaced by the interactive serial-wizard      ║
+    // ║  provisioning flow (Option B) in ChargePoint::initSecurity().    ║
+    // ║                                                                  ║
+    // ║  Calling this will auto-fill NVS with a hardcoded Charger ID     ║
+    // ║  which breaks fleet management (all chargers get the same ID!).  ║
+    // ╚══════════════════════════════════════════════════════════════════╝
     bool migrateFromLegacySecrets()
     {
-        Serial.println("[SECURE_CONFIG] 🔐 Starting credential migration...");
+        Serial.println("[SECURE_CONFIG] ⚠️  migrateFromLegacySecrets() called — this is DEPRECATED.");
         
         // Initialize secure credentials system
         if (!SecureCredentials::g_secureCredentials.init())
@@ -168,6 +179,12 @@ namespace SecureConfig
         Preferences prefs;
         if (!prefs.begin("secure_cred", true)) return false;
 
+        // isKey() guard prevents NOT_FOUND error spam in the serial monitor
+        if (!prefs.isKey("gsm_apn")) {
+            prefs.end();
+            return false;
+        }
+
         String a = prefs.getString("gsm_apn",  "");
         String u = prefs.getString("gsm_user", "");
         String p = prefs.getString("gsm_pass", "");
@@ -181,20 +198,40 @@ namespace SecureConfig
         return true;
     }
 
+    bool storeGSMCredentials(const char* apn, const char* user, const char* pass)
+    {
+        if (!apn || strlen(apn) == 0) return false;
+        Preferences prefs;
+        if (!prefs.begin("secure_cred", false)) return false;
+        prefs.putString("gsm_apn",  apn);
+        prefs.putString("gsm_user", user ? user : "");
+        prefs.putString("gsm_pass", pass ? pass : "");
+        prefs.end();
+        Serial.printf("[SECURE_CONFIG] GSM APN stored: %s\n", apn);
+        return true;
+    }
+
     void factoryReset()
     {
         Serial.println("[SECURE_CONFIG] ⚠️  FACTORY RESET: Clearing all credentials");
         
+        // Clear all secure credentials through the manager, then close it
         SecureCredentials::g_secureCredentials.clearAll();
+        SecureCredentials::g_secureCredentials.close();
         
+        // Also wipe the gsm credentials and migration flags
         Preferences prefs;
+        if (prefs.begin("secure_cred", false))
+        {
+            prefs.clear();
+            prefs.end();
+        }
         if (prefs.begin("secure_config", false))
         {
             prefs.clear();
             prefs.end();
         }
-        
-        Serial.println("[SECURE_CONFIG] ✅ Factory reset completed");
+        Serial.println("[SECURE_CONFIG] ⚠️ Factory reset completed. All secure data cleared.");
         Serial.println("[SECURE_CONFIG] 🔄 Device will require re-provisioning");
     }
 }

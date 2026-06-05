@@ -14,44 +14,52 @@
 
 namespace SafeSerial {
 
-    inline SemaphoreHandle_t& getMutex() {
-        static SemaphoreHandle_t _mutex = xSemaphoreCreateRecursiveMutex();
-        return _mutex;
-    }
+    // ── Provisioning silence flag ──────────────────────────────────────────
+    // Set to true during the provisioning wizard so background tasks don't
+    // flood the Serial monitor while the user is trying to type.
+    bool& isSuppressed();
+    void setSuppressed(bool val);
+    // ─────────────────────────────────────────────────────────────────────
 
-    inline bool lock(uint32_t timeoutMs = 100) {
-        return xSemaphoreTakeRecursive(getMutex(), pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
-    }
+    SemaphoreHandle_t& getMutex();
 
-    inline void unlock() {
-        xSemaphoreGiveRecursive(getMutex());
-    }
+    bool lock(uint32_t timeoutMs = 100);
+    void unlock();
 
     // Thread-safe printf — locks mutex for the entire formatted line
-    inline void printf(const char* format, ...) __attribute__((format(printf, 1, 2)));
-    inline void printf(const char* format, ...) {
-        if (!lock()) return;
-        char buf[256];
-        va_list args;
-        va_start(args, format);
-        vsnprintf(buf, sizeof(buf), format, args);
-        va_end(args);
-        Serial.print(buf);
-        unlock();
-    }
-
+    void printf(const char* format, ...) __attribute__((format(printf, 1, 2)));
+    
     // Thread-safe println
-    inline void println(const char* msg) {
-        if (!lock()) return;
-        Serial.println(msg);
-        unlock();
-    }
+    void println(const char* msg);
 
     // Thread-safe print (no newline)
     inline void print(const char* msg) {
+        if (isSuppressed()) return;   // ← silence during provisioning wizard
         if (!lock()) return;
         Serial.print(msg);
         unlock();
     }
 
+    class SerialWrapper {
+    public:
+        template <typename T>
+        void print(T val) { if (!isSuppressed()) ::Serial.print(val); }
+        template <typename T, typename U>
+        void print(T val, U format) { if (!isSuppressed()) ::Serial.print(val, format); }
+        
+        template <typename T>
+        void println(T val) { if (!isSuppressed()) ::Serial.println(val); }
+        template <typename T, typename U>
+        void println(T val, U format) { if (!isSuppressed()) ::Serial.println(val, format); }
+        void println() { if (!isSuppressed()) ::Serial.println(); }
+        
+        template <typename... Args>
+        void printf(const char* format, Args... args) { 
+            if (!isSuppressed()) ::Serial.printf(format, args...); 
+        }
+    };
+    
+    extern SerialWrapper SafeSerialObj;
+
 } // namespace SafeSerial
+

@@ -1,5 +1,6 @@
 #include "tasks/system_tasks.h"
 #include <Arduino.h>
+#include "system/SafeSerial.h"
 
 extern void processDebugCommand(char c);
 
@@ -22,8 +23,10 @@ static void uiTaskLoop(void *arg)
         uint32_t now = millis();
         if (now - lastWatermarkLog >= 60000u) {
             lastWatermarkLog = now;
-            Serial.printf("[STACK] UI_TASK    free min: %u words\n",
-                          uxTaskGetStackHighWaterMark(nullptr));
+            if (!SafeSerial::isSuppressed()) {
+                Serial.printf("[STACK] UI_TASK    free min: %u words\n",
+                              uxTaskGetStackHighWaterMark(nullptr));
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(50)); // Poll at 20Hz

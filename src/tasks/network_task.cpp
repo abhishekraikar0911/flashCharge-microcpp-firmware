@@ -3,6 +3,7 @@
 #include "services/network/NetworkManager.h"
 #include "services/safety/HealthMonitor.h"
 #include "config/hardware.h"
+#include "system/SafeSerial.h"
 
 namespace prod {
 namespace tasks {
@@ -20,8 +21,10 @@ static void networkTaskLoop(void *arg) {
         uint32_t now = millis();
         if (now - lastWatermarkLog >= 60000u) {
             lastWatermarkLog = now;
-            Serial.printf("[STACK] NETWORK_MGR free min: %u words\n",
-                          uxTaskGetStackHighWaterMark(nullptr));
+            if (!SafeSerial::isSuppressed()) {
+                Serial.printf("[STACK] NETWORK_MGR free min: %u words\n",
+                              uxTaskGetStackHighWaterMark(nullptr));
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));

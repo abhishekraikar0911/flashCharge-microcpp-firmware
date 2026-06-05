@@ -3,6 +3,10 @@
 #include "services/safety/HealthMonitor.h"
 #include "bsp/esp32_rev1/bsp_init.h"
 #include "config/hardware.h"
+#include "system/SafeSerial.h"
+
+// Override Serial to automatically suppress all logs when provisioning wizard is active
+#define Serial SafeSerial::SafeSerialObj
 
 namespace prod {
 namespace tasks {
@@ -22,8 +26,10 @@ static void can2RxTaskLoop(void* arg) {
         uint32_t now = millis();
         if (now - lastWatermarkLog >= 60000u) {
             lastWatermarkLog = now;
-            Serial.printf("[STACK] CAN2_RX   free min: %u words\n",
-                          uxTaskGetStackHighWaterMark(nullptr));
+            if (!SafeSerial::isSuppressed()) {
+                Serial.printf("[STACK] CAN2_RX   free min: %u words\n",
+                              uxTaskGetStackHighWaterMark(nullptr));
+            }
         }
     }
 }

@@ -69,6 +69,22 @@ public:
     }
 
     /**
+     * @brief Store WiFi credentials in NVS (priority-1 slot).
+     * Stores under the "secure_cred" namespace with keys wifi_ssid_1 / wifi_pass_1,
+     * which matches SecureConfig::getWiFiCredentials(priority=1).
+     */
+    bool storeWiFiCredentials(const char* ssid, const char* password) {
+        if (!ssid) return false;
+        Preferences prefs;
+        if (!prefs.begin("secure_cred", /*readOnly=*/false)) return false;
+        prefs.putString("wifi_ssid_1", ssid);
+        prefs.putString("wifi_pass_1", password ? password : "");
+        prefs.end();
+        Serial.printf("[SECURITY] WiFi credentials stored for SSID: %s\n", ssid);
+        return true;
+    }
+
+    /**
      * @brief Retrieve stored OCPP credentials from NVS.
      * @param host      Output buffer for hostname
      * @param port      Output reference for port number
@@ -82,6 +98,12 @@ public:
         if (!host || !id) return false;
         Preferences prefs;
         if (!prefs.begin(NVS_NAMESPACE, /*readOnly=*/true)) return false;
+
+        // isKey() check prevents the Arduino core from printing NOT_FOUND errors
+        if (!prefs.isKey("ocpp_host") || !prefs.isKey("ocpp_id")) {
+            prefs.end();
+            return false;
+        }
 
         String h = prefs.getString("ocpp_host", "");
         port      = prefs.getUShort("ocpp_port", 443);
@@ -102,10 +124,9 @@ public:
     bool hasCredentials() {
         Preferences prefs;
         if (!prefs.begin(NVS_NAMESPACE, /*readOnly=*/true)) return false;
-        String h = prefs.getString("ocpp_host", "");
-        String i = prefs.getString("ocpp_id",   "");
+        bool ok = prefs.isKey("ocpp_host") && prefs.isKey("ocpp_id");
         prefs.end();
-        return (h.length() > 0 && i.length() > 0);
+        return ok;
     }
 
     /**
@@ -118,6 +139,16 @@ public:
             prefs.clear();
             prefs.end();
         }
+    }
+
+    /**
+     * @brief No-op close for API compatibility.
+     * SecureCredentialStore opens/closes Preferences per-call,
+     * so no persistent handle needs closing. This method exists
+     * so SecureConfig::factoryReset() can call it without errors.
+     */
+    void close() {
+        // nothing to do — this store is stateless (opens/closes per call)
     }
 };
 

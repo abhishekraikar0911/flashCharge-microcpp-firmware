@@ -6,6 +6,7 @@
 #include "services/safety/HealthMonitor.h"
 #include "system/state/SystemState.h"
 #include "config/hardware.h"
+#include "system/SafeSerial.h"
 
 namespace prod {
 namespace tasks {
@@ -51,8 +52,10 @@ static void ocppTaskLoop(void *pvParameters)
         uint32_t now = millis();
         if (now - lastWatermarkLog >= 60000u) {
             lastWatermarkLog = now;
-            Serial.printf("[STACK] OCPP_LOOP  free min: %u words\n",
-                          uxTaskGetStackHighWaterMark(nullptr));
+            if (!SafeSerial::isSuppressed()) {
+                Serial.printf("[STACK] OCPP_LOOP  free min: %u words\n",
+                              uxTaskGetStackHighWaterMark(nullptr));
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));

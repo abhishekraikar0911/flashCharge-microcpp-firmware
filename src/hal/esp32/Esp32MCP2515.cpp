@@ -30,6 +30,10 @@
  */
 #include "hal/esp32/Esp32MCP2515.h"
 #include <Arduino.h>
+#include "system/SafeSerial.h"
+
+// Override Serial to automatically suppress all logs when provisioning wizard is active
+#define Serial SafeSerial::SafeSerialObj
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -197,11 +201,13 @@ bool Esp32MCP2515::isHealthy() {
         if (millis() - lastBoLog > 1000) {
             lastBoLog = millis();
             // DIAGNOSTIC: TEC range tells us if it's a TX problem; REC range = RX/bus noise
-            Serial.printf("[HAL_CAN2] 🚨 Bus-Off! EFLG=0x%02X | TEC=%s | REC=%s → %s\n",
-                          eflg, tecRange, recRange,
-                          (eflg & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP | MCP2515::EFLG_TXWAR))
-                              ? "TX fault — check: transceiver RS/STB pin, termination, CANH/CANL polarity"
-                              : "RX fault — check: ground isolation, shielding, bus load");
+            if (!SafeSerial::isSuppressed()) {
+                Serial.printf("[HAL_CAN2] 🚨 Bus-Off! EFLG=0x%02X | TEC=%s | REC=%s → %s\n",
+                              eflg, tecRange, recRange,
+                              (eflg & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP | MCP2515::EFLG_TXWAR))
+                                  ? "TX fault — check: transceiver RS/STB pin, termination, CANH/CANL polarity"
+                                  : "RX fault — check: ground isolation, shielding, bus load");
+            }
         }
     }
     return !busOff;
@@ -264,7 +270,9 @@ void Esp32MCP2515::drainHardwareBuffer() {
 void Esp32MCP2515::reset() {
     if (xSemaphoreTake(mutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
 
-    Serial.println("[HAL_CAN2] 🔄 Resetting MCP2515 for Bus-Off recovery...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[HAL_CAN2] 🔄 Resetting MCP2515 for Bus-Off recovery...");
+    }
 
     mcp->reset();                                // → configuration mode
     CAN_SPEED speed = getMcpSpeed(currentBaud);
@@ -280,7 +288,9 @@ void Esp32MCP2515::reset() {
     xQueueReset(rxQueue);
 
     xSemaphoreGive(mutex);
-    Serial.println("[HAL_CAN2] ✅ MCP2515 reset complete — filters restored, bus rejoined");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[HAL_CAN2] ✅ MCP2515 reset complete — filters restored, bus rejoined");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +323,9 @@ void Esp32MCP2515::applyFilters() {
     mcp->setFilter(MCP2515::RXF4,      /*extended=*/true, 0x1806E5F4);
     mcp->setFilter(MCP2515::RXF5,      /*extended=*/true, 0x1806E5F4);
 
-    Serial.println("[HAL_CAN2] ✅ HW filters: RXB0=RXB1=0x1806E5F4 only (0x18904001 blocked)");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[HAL_CAN2] ✅ HW filters: RXB0=RXB1=0x1806E5F4 only (0x18904001 blocked)");
+    }
 }
 
 // ---------------------------------------------------------------------------

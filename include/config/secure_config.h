@@ -65,6 +65,15 @@ namespace SecureConfig
                            size_t apnLen, size_t userLen, size_t passLen);
 
     /**
+     * @brief Store GSM/SIM credentials to NVS
+     * @param apn  APN string (e.g. "airtelgprs.com")
+     * @param user APN username (blank for most Indian SIMs)
+     * @param pass APN password (blank for most Indian SIMs)
+     * @return true if stored successfully
+     */
+    bool storeGSMCredentials(const char* apn, const char* user, const char* pass);
+
+    /**
      * @brief Factory reset - clear all stored credentials
      * WARNING: This will require re-provisioning
      */

@@ -11,6 +11,7 @@
 #include "services/ota/OtaManager.h"
 #include "services/safety/SystemMonitor.h"
 #include "tasks/system_tasks.h"
+#include "services/provisioning/ProvisioningManager.h"
 
 namespace prod {
 
@@ -65,15 +66,24 @@ void ChargePoint::cleanStaleTransactions() {
 }
 
 void ChargePoint::initSecurity() {
-    Serial.println("[System] 🔐 Checking secure credential migration...");
-    if (!SecureConfig::isConfigured()) {
-        Serial.println("[System] 📦 First boot detected - migrating credentials to secure storage...");
-        if (SecureConfig::migrateFromLegacySecrets()) {
-            Serial.println("[System] ✅ Credential migration completed successfully");
-        } else {
-            Serial.println("[System] ❌ CRITICAL: Credential migration failed!");
-        }
+    Serial.println("[System] 🔐 Checking secure credentials in NVS...");
+
+    // ── OPTION B: Serial-Wizard Provisioning ─────────────────────────────
+    // On a completely new / factory-reset ESP32 the NVS is empty.
+    // We NEVER auto-fill with hardcoded IDs. Instead we block here and let
+    // the worker type the unique Charger ID + server details into the Serial
+    // Monitor. After that one-time entry the credentials are stored in NVS
+    // and this block is skipped on every future boot (wire re-flash or OTA).
+    // ─────────────────────────────────────────────────────────────────────
+    if (Provisioning::isProvisioningRequired()) {
+        Serial.println("[System] 🆕 NEW DEVICE DETECTED — NVS is empty.");
+        Serial.println("[System] 🔧 Starting interactive provisioning wizard...");
+        Provisioning::enterProvisioningMode(); // blocks until done, then restarts ESP32
+        // ESP32 restarts inside enterProvisioningMode(), so we never reach here.
+        return;
     }
+
+    Serial.println("[System] ✅ NVS credentials found — skipping provisioning.");
 
     char chargerId[32], csmsHost[128], csmsUrl[256];
     uint16_t csmsPort;

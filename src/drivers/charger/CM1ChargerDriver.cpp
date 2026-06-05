@@ -71,7 +71,7 @@ bool CM1ChargerDriver::isReady() {
     bool ready = (lastTelemetryTime > 0) && (now - lastTelemetryTime < 10000);
     
     static uint32_t lastLog = 0;
-    if (now - lastLog > 5000) {
+    if (now - lastLog > 10000) {  // 10s — WARN level, needs prompt visibility
         lastLog = now;
         if (!ready) {
             logger.logf(ILogger::Level::WARN, "CM1_DRV", "NOT READY - lastTel:%lu now:%lu", 

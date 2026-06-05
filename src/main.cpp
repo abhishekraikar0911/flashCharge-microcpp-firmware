@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <MicroOcpp.h>
+#include <cstdint>
 #include "app/ChargePoint.h"
 #include "bsp/esp32_rev1/bsp_init.h"
 #include "services/safety/HealthMonitor.h"

@@ -19,6 +19,7 @@ void Esp32UartLogger::init(uint32_t baud) {
 
 void Esp32UartLogger::log(Level level, const char* tag, const char* message) {
     if (level < currentLevel || level == Level::NONE) return;
+    if (SafeSerial::isSuppressed()) return;  // ← silent during provisioning wizard
 
     char buf[300];
     snprintf(buf, sizeof(buf), "[%s] [%s] %s\n", levelToString(level), tag, message);
@@ -31,9 +32,8 @@ void Esp32UartLogger::log(Level level, const char* tag, const char* message) {
 
 void Esp32UartLogger::logf(Level level, const char* tag, const char* fmt, ...) {
     if (level < currentLevel || level == Level::NONE) return;
+    if (SafeSerial::isSuppressed()) return;  // ← silent during provisioning wizard
 
-    // Format the full line (prefix + message + newline) in one buffer,
-    // then emit it with a SINGLE Serial.print() call under the mutex.
     char msgBuf[256];
     va_list args;
     va_start(args, fmt);

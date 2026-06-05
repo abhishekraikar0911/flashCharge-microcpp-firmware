@@ -20,6 +20,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <time.h>
+#include "system/SafeSerial.h"
+
+// Override Serial to automatically suppress all logs when provisioning wizard is active
+#define Serial SafeSerial::SafeSerialObj
 
 namespace prod {
 
@@ -108,18 +112,22 @@ void NetworkManager::poll() {
                 // Industrial Context-Aware Failover
                 int maxRetries = charging ? GSM_CHARGING_MAX_RETRIES : GSM_MAX_RETRIES;
 
-                Serial.printf("[NET] ❌ GSM attempt %d/%d failed (Err=%d, Charging=%d)\n", 
-                              _gsmRetryCount, maxRetries, (int)err, charging);
+                if (!SafeSerial::isSuppressed()) {
+                    Serial.printf("[NET] ❌ GSM attempt %d/%d failed (Err=%d, Charging=%d)\n", 
+                                  _gsmRetryCount, maxRetries, (int)err, charging);
+                }
 
                 // RAPID FAILOVER: If SIM is missing during charge, don't even retry. Switch to WiFi NOW.
                 bool fatalSimError = (err == GsmError::FAIL_FATAL_NO_SIM);
                 if ((fatalSimError && charging) || (_gsmRetryCount >= maxRetries)) {
-                    if (fatalSimError && charging) {
-                        Serial.println("[NET] 🚨 FATAL: SIM missing during Charge — Instant WiFi Fallback!");
-                    } else if (charging) {
-                        Serial.println("[NET] 🚀 Industrial Failover: Fast-tracking WiFi switch due to active transaction");
-                    } else {
-                        Serial.println("[NET] 🔄 GSM failed — falling back to WiFi...");
+                    if (!SafeSerial::isSuppressed()) {
+                        if (fatalSimError && charging) {
+                            Serial.println("[NET] 🚨 FATAL: SIM missing during Charge — Instant WiFi Fallback!");
+                        } else if (charging) {
+                            Serial.println("[NET] 🚀 Industrial Failover: Fast-tracking WiFi switch due to active transaction");
+                        } else {
+                            Serial.println("[NET] 🔄 GSM failed — falling back to WiFi...");
+                        }
                     }
                     _state = NetworkState::GSM_FAILED;
                 }
@@ -240,7 +248,9 @@ void NetworkManager::poll() {
 // ═══════════════════════════════════════════════════════════
 
 GsmError NetworkManager::attemptGSM() {
-    Serial.println("[NET] 📡 Attempting GSM connection...");
+    if (!SafeSerial::isSuppressed()) {
+        Serial.println("[NET] 📡 Attempting GSM connection...");
+    }
 
     // FIX B: Forcibly drop any stale GPRS/PDP session before connecting.
     if (g_gsmManager.isConnected()) {
@@ -259,7 +269,9 @@ GsmError NetworkManager::attemptGSM() {
             }
         }
 
-        Serial.println("[NET] GSM in error state, attempting recovery...");
+        if (!SafeSerial::isSuppressed()) {
+            Serial.println("[NET] GSM in error state, attempting recovery...");
+        }
 
         // Tiered recovery
         if (!g_gsmManager.softReset()) {
