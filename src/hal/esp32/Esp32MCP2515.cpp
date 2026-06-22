@@ -29,6 +29,7 @@
  * @date 2026
  */
 #include "hal/esp32/Esp32MCP2515.h"
+#include "system/FaultQueue.h"   // CAN_TX_FAIL hardware fault reporting
 #include <Arduino.h>
 #include "system/SafeSerial.h"
 
@@ -132,7 +133,10 @@ bool Esp32MCP2515::send(const CanFrame& frame) {
 
     if (err != MCP2515::ERROR_OK) {
         uint8_t eflg = mcp->getErrorFlags();
-        static uint32_t lastErrLog = 0;
+        static uint32_t lastErrLog    = 0;
+        static uint8_t  txFailCount   = 0;   // consecutive TX fail counter
+        static uint32_t txFailWindowMs = 0;  // window start time
+
         if (millis() - lastErrLog > 3000) {
             lastErrLog = millis();
             Serial.printf("[HAL_CAN2] TX FAIL 0x%08lX err=%d EFLG=0x%02X",
@@ -141,6 +145,23 @@ bool Esp32MCP2515::send(const CanFrame& frame) {
             if (eflg & MCP2515::EFLG_TXEP)  Serial.print(" [TX-ERR-PASSIVE]");
             if (eflg & MCP2515::EFLG_RXEP)  Serial.print(" [RX-ERR-PASSIVE]");
             Serial.println();
+        }
+
+        // ── Fault Escalation: 3 TX failures within 60s → report to CSMS ──
+        uint32_t now = millis();
+        if (now - txFailWindowMs > 60000u) {
+            // Reset window
+            txFailWindowMs = now;
+            txFailCount = 0;
+        }
+        txFailCount++;
+        if (txFailCount >= 3) {
+            txFailCount = 0; // Reset so we don't spam
+            char desc[FAULT_DESC_LEN];
+            snprintf(desc, sizeof(desc),
+                "MCP2515 CAN TX failed %d times in 60s (err=%d EFLG=0x%02X). "
+                "Check CAN wiring or BMS connector.", 3, (int)err, eflg);
+            FaultQueue::push("CAN_TX_FAIL", desc, FAULT_SEV_CRITICAL);
         }
     }
 

@@ -14,9 +14,11 @@
 #include "config/hardware.h"
 #include "config/secure_config.h"
 #include "services/safety/HealthMonitor.h"
+#include "system/FaultQueue.h"   // GSM hardware fault reporting
 #include <Arduino.h>
 #include <driver/uart.h>  // ESP-IDF UART driver — needed for uart_set_hw_flow_ctrl()
 #include "system/SafeSerial.h"
+#include "system/CrashForensics.h"
 
 // Override Serial to automatically suppress all logs when provisioning wizard is active
 #define Serial SafeSerial::SafeSerialObj
@@ -197,14 +199,18 @@ bool GSMManager::stepModemReady() {
     Serial.println("[GSM] 🔧 Step 2/6: Configuring modem...");
 
     // Initialize modem (sets up echo, error reporting, etc.)
+    g_healthMonitor.feed(); // Feed WDT — modem.init() can block 3-8s
     if (!_modem.init()) {
         Serial.println("[GSM] ⚠️  modem.init() failed, trying restart...");
+        g_healthMonitor.feed(); // Feed WDT — modem.restart() can block 5s
         if (!_modem.restart()) {
             Serial.println("[GSM] ❌ Modem restart failed");
             setState(GSMState::ERROR);
             return false;
         }
+        g_healthMonitor.feed();
     }
+    g_healthMonitor.feed();
 
     // Disable echo for cleaner AT parsing
     _modem.sendAT("+ATE0");
@@ -255,7 +261,9 @@ bool GSMManager::stepSimReady() {
     Serial.println("[GSM] 💳 Step 3/6: Checking SIM card...");
 
     // Check SIM status
+    g_healthMonitor.feed(); // Feed WDT — getSimStatus() blocks ~2s
     SimStatus simStatus = _modem.getSimStatus();
+    g_healthMonitor.feed();
     if (simStatus != SIM_READY) {
         Serial.printf("[GSM] ❌ SIM not ready (status=%d)\n", simStatus);
         Serial.println("[GSM]   Check: SIM inserted? SIM locked with PIN?");
@@ -315,24 +323,133 @@ bool GSMManager::stepDataAttached() {
     Serial.println("[GSM] \U0001f310 Step 5/6: Attaching GPRS/LTE data...");
 
     // Load APN from NVS (SecureConfig) — no hardcoded credentials in source
-    char apn[32]  = "JIOCIOT2";  // Safe default if NVS not yet migrated
+    char apn[32]  = "";
     char user[32] = "";
     char pass[32] = "";
-    if (SecureConfig::getGSMCredentials(apn, user, pass, sizeof(apn), sizeof(user), sizeof(pass))) {
+    bool apnFromNvs = false;
+
+    if (SecureConfig::getGSMCredentials(apn, user, pass, sizeof(apn), sizeof(user), sizeof(pass))
+        && strlen(apn) > 0) {
         Serial.printf("[GSM] \U0001f511 APN loaded from NVS: %s\n", apn);
-    } else {
-        Serial.println("[GSM] \u26a0\ufe0f  APN not in NVS — using compile-time fallback");
+        apnFromNvs = true;
     }
 
-    // Connect to GPRS/LTE data with APN
-    if (!_modem.gprsConnect(apn, user, pass)) {
-        Serial.printf("[GSM] \u274c GPRS connect failed (APN: %s)\n", apn);
-        setState(GSMState::ERROR);
-        return false;
+    if (apnFromNvs) {
+        // Try the saved APN directly
+        g_healthMonitor.feed(); 
+        _modem.gprsDisconnect();
+        yieldDelay(1000);
+
+        g_healthMonitor.feed();
+
+        Serial.printf("[GSM] --> AT+CGACT=0,1 (Deactivating context)\n");
+        _modem.sendAT(GF("+CGACT=0,1"));
+        _modem.waitResponse(10000L);
+
+        Serial.printf("[GSM] --> AT+CGDCONT=1,\"IP\",\"%s\" (from NVS)\n", apn);
+        _modem.sendAT(GF("+CGDCONT=1,\"IP\",\""), apn, GF("\""));
+        int resCgdcontNvs = _modem.waitResponse(10000L);
+        Serial.printf("[GSM] <-- CGDCONT response: %d\n", resCgdcontNvs);
+
+        Serial.printf("[GSM] --> AT+CGACT=1,1 (Activating context)\n");
+        _modem.sendAT(GF("+CGACT=1,1"));
+        int resCgactNvs = _modem.waitResponse(10000L);
+        Serial.printf("[GSM] <-- CGACT response: %d\n", resCgactNvs);
+
+        g_healthMonitor.feed();
+
+        Serial.println("[GSM] --> AT+NETOPEN (from NVS)");
+        _modem.sendAT(GF("+NETOPEN"));
+        int resNetopenNvs = _modem.waitResponse(75000L, GF(GSM_NL "+NETOPEN: 0"));
+        Serial.printf("[GSM] <-- NETOPEN response: %d\n", resNetopenNvs);
+
+        String ipNvs = _modem.getLocalIP();
+        bool hasIpNvs = (ipNvs.length() > 0 && ipNvs != "0.0.0.0");
+        Serial.printf("[GSM] Assigned IP: %s\n", ipNvs.c_str());
+
+        if (resNetopenNvs == 1 || hasIpNvs) {
+            g_healthMonitor.feed();
+            Serial.printf("[GSM] \u2705 Data attached (APN: %s)\n", apn);
+            return true;
+        }
+        g_healthMonitor.feed();
+        Serial.printf("[GSM] \u274c Saved APN failed (%s). Trying auto-detect...\n", apn);
     }
 
-    Serial.printf("[GSM] \u2705 Data attached (APN: %s)\n", apn);
-    return true;
+    // ── APN Auto-Detection ─────────────────────────────────────────────
+    // Cycles through well-known Indian SIM APNs and saves the one that works.
+    // CRITICAL: Each gprsConnect() can block for 10-30s — we feed the WDT
+    // before and after every attempt to prevent a 30s WDT crash.
+    const char* apnList[] = {
+        "jionet",           // Jio standard SIM  ← confirmed working
+        "JIOCIOT2",         // Jio IoT/M2M SIM
+        "airtelgprs.com",   // Airtel
+        "vi.gprs",          // Vi / Vodafone Idea
+        "bsnlnet",          // BSNL
+        "internet",         // Generic fallback
+    };
+    const int apnCount = sizeof(apnList) / sizeof(apnList[0]);
+
+    for (int i = 0; i < apnCount; i++) {
+        Serial.printf("[GSM] Trying APN [%d/%d]: %s\n", i + 1, apnCount, apnList[i]);
+        g_healthMonitor.feed(); 
+        _modem.gprsDisconnect();
+        yieldDelay(1000);
+
+        g_healthMonitor.feed();
+
+        // --- Custom A7670C AT Sequence for Diagnosis ---
+        Serial.printf("[GSM] --> AT+CGACT=0,1 (Deactivating context)\n");
+        _modem.sendAT(GF("+CGACT=0,1"));
+        _modem.waitResponse(10000L); // Ignore response, just ensure it's down
+
+        Serial.printf("[GSM] --> AT+CGDCONT=1,\"IP\",\"%s\"\n", apnList[i]);
+        _modem.sendAT(GF("+CGDCONT=1,\"IP\",\""), apnList[i], GF("\""));
+        int resCgdcont = _modem.waitResponse(10000L);
+        Serial.printf("[GSM] <-- CGDCONT response: %d\n", resCgdcont);
+
+        Serial.printf("[GSM] --> AT+CGACT=1,1 (Activating context)\n");
+        _modem.sendAT(GF("+CGACT=1,1"));
+        int resCgact = _modem.waitResponse(10000L);
+        Serial.printf("[GSM] <-- CGACT response: %d\n", resCgact);
+
+        g_healthMonitor.feed();
+        
+        Serial.println("[GSM] --> AT+NETOPEN");
+        _modem.sendAT(GF("+NETOPEN"));
+        CrashForensics::setActivity(CrashForensics::ACT_NETOPEN);
+        CrashForensics::persist();
+        int resNetopen = _modem.waitResponse(75000L, GF(GSM_NL "+NETOPEN: 0"));
+        CrashForensics::setActivity(CrashForensics::ACT_IDLE);
+        CrashForensics::persist();
+        Serial.printf("[GSM] <-- NETOPEN response: %d\n", resNetopen);
+
+        // Check if IP is assigned
+        String ip = _modem.getLocalIP();
+        bool hasIp = (ip.length() > 0 && ip != "0.0.0.0");
+        Serial.printf("[GSM] Assigned IP: %s\n", ip.c_str());
+
+        // If either NETOPEN succeeded (1) or IP is already assigned
+        if (resNetopen == 1 || hasIp) {
+            g_healthMonitor.feed(); 
+            Serial.printf("[GSM] \u2705 Data attached (APN: %s)\n", apnList[i]);
+            SecureConfig::storeGSMCredentials(apnList[i], "", "");
+            Serial.printf("[GSM] \U0001f4be Working APN saved to NVS: %s\n", apnList[i]);
+            return true;
+        }
+
+        g_healthMonitor.feed(); 
+        Serial.printf("[GSM] \u274c Failed: %s\n", apnList[i]);
+    }
+
+    Serial.println("[GSM] \u274c All APN attempts failed. No data connection.");
+    // Report SIM/APN fault to CSMS — SIM card may be dead or antenna broken
+    FaultQueue::push("GSM_NO_APN",
+        "All 6 APN attempts failed (jionet, JIOCIOT2, airtelgprs, vi, bsnl, internet). "
+        "SIM card may be dead, unregistered, or antenna damaged.",
+        FAULT_SEV_CRITICAL);
+    setState(GSMState::ERROR);
+    return false;
 }
 
 bool GSMManager::stepIpReady() {
@@ -385,6 +502,11 @@ void GSMManager::poll() {
             
             if (_missedHeartbeats >= 3) {
                 Serial.println("[GSM] ❌ CRITICAL: 3 AT heartbeats missed. Forcing HARD RESET.");
+                // Report modem hardware fault to CSMS before resetting
+                FaultQueue::push("GSM_MODEM_DEAD",
+                    "SIM A7670C modem missed 3 consecutive AT heartbeats. "
+                    "Hardware fault or antenna damage suspected.",
+                    FAULT_SEV_CRITICAL);
                 _missedHeartbeats = 0;
                 hardReset();
                 setState(GSMState::ERROR); // network_manager will catch this and try reconnect
@@ -420,8 +542,20 @@ void GSMManager::poll() {
             Serial.printf("[GSM] ⚠️  Weak signal: CSQ=%d | Voltage: %.2fV\n", _lastCSQ, voltage);
         }
 
+        static bool lowVoltReported = false;
         if (voltage > 0.1f && voltage < 3.4f) {
             Serial.printf("[GSM] ❌ CRITICAL: Low supply voltage: %.2fV (Modem needs 3.4V-4.4V)\n", voltage);
+            // Report low voltage to CSMS — indicates PSU or battery issue (report once per dip)
+            if (!lowVoltReported) {
+                char desc[FAULT_DESC_LEN];
+                snprintf(desc, sizeof(desc),
+                    "GSM modem supply voltage %.2fV is below minimum 3.4V. "
+                    "Check power supply or battery connections.", voltage);
+                FaultQueue::push("GSM_LOW_VOLTAGE", desc, FAULT_SEV_CRITICAL);
+                lowVoltReported = true;
+            }
+        } else {
+            lowVoltReported = false; // Voltage recovered — allow re-reporting if it dips again
         }
     }
 }
@@ -439,19 +573,15 @@ void GSMManager::hardReset() {
     }
 
     digitalWrite(GSM_RESET_PIN, HIGH);
-    delay(400); 
+    yieldDelay(400); // WDT-safe 400ms pulse
     digitalWrite(GSM_RESET_PIN, LOW);
-    
     g_healthMonitor.feed();
 
     // Wait for power stabilization and boot
     if (!SafeSerial::isSuppressed()) {
         Serial.println("[GSM] ⏳ Waiting 10s for modem stabilization...");
     }
-    for (int i=0; i<10; i++) {
-        delay(1000);
-        g_healthMonitor.feed();
-    }
+    yieldDelay(10000); // WDT-safe 10s stabilization wait
 }
 
 bool GSMManager::softReset() {
@@ -527,14 +657,24 @@ float GSMManager::getSupplyVoltage() {
 bool GSMManager::waitForAT(uint32_t timeoutMs) {
     uint32_t start = millis();
     while (millis() - start < timeoutMs) {
-        g_healthMonitor.feed(); // Feed watchdog during AT wait
+        g_healthMonitor.feed();
         if (_modem.testAT()) {
             return true;
         }
-        delay(200); // Check more frequently
-        g_healthMonitor.feed();
+        yieldDelay(200); // WDT-safe 200ms poll interval
     }
     return false;
+}
+
+void GSMManager::yieldDelay(uint32_t ms) {
+    // WDT-safe replacement for raw delay().
+    // Feeds the hardware watchdog AND yields to FreeRTOS every 100ms
+    // so other tasks (OCPP, CAN RX) can run while we wait.
+    uint32_t start = millis();
+    while (millis() - start < ms) {
+        g_healthMonitor.feed();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 void GSMManager::setState(GSMState newState) {

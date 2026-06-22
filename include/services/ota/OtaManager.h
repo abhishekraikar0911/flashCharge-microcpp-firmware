@@ -22,6 +22,20 @@ namespace prod
 
         // Check if the freshly downloaded update is valid and ready to execute
         static bool isUpdateValid();
+
+        // ── Deferred reboot support ──────────────────────────────────────
+        // When OTA install is triggered but gun is plugged, we defer the
+        // reboot instead of rejecting. hw_svc_task polls hasDeferredReboot()
+        // and reboots automatically once the gun is safely unplugged.
+
+        /** Set or clear the deferred reboot flag. */
+        static void setDeferredReboot(bool pending);
+
+        /** Returns true if a firmware install is waiting for gun unplug. */
+        static bool hasDeferredReboot();
+
+        /** Returns millis() timestamp of when the deferral was set. */
+        static uint32_t getDeferredSinceMs();
     };
 
     extern OTAManager g_otaManager;

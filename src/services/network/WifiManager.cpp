@@ -62,7 +62,13 @@ namespace prod
         
         WiFi.disconnect(true);
         WiFi.mode(WIFI_STA);
-        WiFi.begin(ssid, pass);
+        
+        if (strlen(pass) == 0) {
+            Serial.println("[WiFi] Network has no password (Open Network)");
+            WiFi.begin(ssid);
+        } else {
+            WiFi.begin(ssid, pass);
+        }
 
         uint32_t startTime = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - startTime < CONNECT_TIMEOUT_MS)

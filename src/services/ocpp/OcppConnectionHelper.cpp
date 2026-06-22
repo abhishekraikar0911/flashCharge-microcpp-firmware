@@ -13,6 +13,7 @@
 #include "config/secure_config.h"
 #include "config/certs.h"
 #include "system/SafeSerial.h"
+#include "system/CrashForensics.h"   // Activity tracking + TLS timing for crash diagnosis
 #include <Arduino.h>
 
 namespace prod {
@@ -127,10 +128,27 @@ namespace prod {
         // CRITICAL: also destroy the WS SSLClient here so OTA gets a clean,
         // unshared TinyGsmClient. Without this, both SSLClient objects reference
         // the same modem slot simultaneously → NGINX fatal TLS alert or backend crash.
-        if (g_networkManager.isOtaActive()) {
+        bool otaActive = g_networkManager.isOtaActive();
+        if (otaActive) {
             teardownGsmWebSocket();
+            _lastOtaActive = true;
             return;
         }
+
+        // POST-OTA COOLDOWN: The modem is exhausted after a full OTA download.
+        // Immediately connecting TLS after OTA causes _sslClient->connect() to block
+        // the OCPP_LOOP task until the task watchdog fires and crashes the device.
+        // Wait 15 seconds after OTA mode clears before attempting to reconnect.
+        if (_lastOtaActive) {
+            _lastOtaActive = false;
+            _otaClearedAt = millis();
+            Serial.println("[WS_GSM] ⏳ OTA just ended — waiting 15s for modem to recover before WS reconnect...");
+        }
+        if (_otaClearedAt > 0 && millis() - _otaClearedAt < 15000) {
+            return; // Modem cooldown in progress — do nothing
+        }
+        _otaClearedAt = 0; // Cooldown expired, allow reconnect
+
 
 
         if (!_sslClient) {
@@ -151,7 +169,39 @@ namespace prod {
 
             Serial.printf("[WS_GSM] 🔌 Connecting to %s:%d (GSM+TLS)...\n", _serverHost, _serverPort);
             
+            // ── Forensics: mark activity BEFORE blocking call ──────────────
+            // SSLClient::connect() can block 10-40s on GSM — the longest
+            // single blocking operation in the firmware. If the WDT fires
+            // during this call, the next crash report will show:
+            //   lastActivity=TLS_CONNECT  tlsMs=<last known duration>
+            // This is the key field that confirms or rules out Theory A.
+            CrashForensics::setActivity(CrashForensics::ACT_TLS_CONNECT);
+            CrashForensics::persist();   // Write to NVS NOW before we block
+
+            // ── Reliability: feed WDT immediately before blocking TLS ──────
+            // If TLS takes 25s on a slow network, the 30s WDT window would
+            // fire without this feed. This is a reliability improvement, not
+            // the root-cause fix — see CrashForensics for the real diagnosis.
+            g_healthMonitor.feed();
+
+            uint32_t tlsStart = millis();
             bool tlsOk = _sslClient->connect(_serverHost, _serverPort);
+            uint32_t tlsDurationMs = millis() - tlsStart;
+
+            // Feed immediately after unblocking
+            g_healthMonitor.feed();
+
+            // ── Forensics: record measured TLS duration ────────────────────
+            // This is the actual evidence: if tlsMs > 25000 we're dangerously
+            // close to the 30s WDT limit even with the feed above.
+            // If tlsMs < 15000 consistently, TLS is NOT the crash cause.
+            CrashForensics::setTlsDurationMs(tlsDurationMs);
+            CrashForensics::setActivity(CrashForensics::ACT_IDLE);
+            CrashForensics::persist();   // Persist measured value
+
+            Serial.printf("[WS_GSM] ⏱️  TLS connect: %lu ms (%s)\n",
+                          (unsigned long)tlsDurationMs,
+                          tlsOk ? "✅ OK" : "❌ FAILED");
             
             if (tlsOk) {
                 if (gsmHandshake()) {

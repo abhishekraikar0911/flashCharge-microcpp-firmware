@@ -4,6 +4,7 @@
 #include "services/safety/HealthMonitor.h"
 #include "services/ocpp/OcppClient.h"
 #include "config/version.h"
+#include "system/CrashForensics.h"
 #include <Update.h>
 #include <MicroOcpp/Core/Context.h>
 #include <MicroOcpp/Core/Ftp.h>
@@ -161,6 +162,10 @@ namespace prod
                 Update.abort();
                 return 0;
             }
+
+            // Mark forensics so if we crash during download, we know exactly where
+            CrashForensics::setActivity(CrashForensics::ACT_OTA_DOWNLOAD);
+            CrashForensics::persist();
         }
 
         if (!otaActive || !shaInit)
@@ -286,6 +291,37 @@ namespace prod
     bool OTAManager::isUpdateValid()
     {
         return _updateValid;
+    }
+
+    // ── Deferred reboot support ──────────────────────────────────────────
+    // These are set by the OcppService install callback when the gun is
+    // plugged during OTA. hw_svc_task polls hasDeferredReboot() and
+    // reboots safely once the gun is unplugged.
+    // VOLATILE: written by OCPP task (Core 0), read by hw_svc_task (Core 1).
+    // Must be volatile to prevent the compiler from caching the value in a
+    // CPU register — without this, Core 1 may never see the flag being set.
+    static volatile bool     _deferredRebootPending = false;
+    static volatile uint32_t _deferredSinceMs      = 0;
+
+    void OTAManager::setDeferredReboot(bool pending)
+    {
+        _deferredRebootPending = pending;
+        _deferredSinceMs      = pending ? (uint32_t)millis() : 0;
+        if (pending) {
+            Serial.println("[OTA] 🔄 Deferred reboot flag SET — waiting for gun unplug");
+        } else {
+            Serial.println("[OTA] 🔄 Deferred reboot flag CLEARED");
+        }
+    }
+
+    bool OTAManager::hasDeferredReboot()
+    {
+        return _deferredRebootPending;
+    }
+
+    uint32_t OTAManager::getDeferredSinceMs()
+    {
+        return _deferredSinceMs;
     }
 
     OTAManager g_otaManager;

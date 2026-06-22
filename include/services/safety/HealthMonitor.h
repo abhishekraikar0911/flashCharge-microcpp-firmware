@@ -21,7 +21,7 @@ namespace prod
     class HealthMonitor
     {
     private:
-        static const uint32_t WATCHDOG_TIMEOUT_SECONDS = 30; // Increased to match hardware.h
+        static const uint32_t WATCHDOG_TIMEOUT_SECONDS = 90; // Increased to 90s because GSM TCP timeouts are 60s
         static const uint32_t WIFI_DISCONNECT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
         static const uint32_t HEALTH_CHECK_INTERVAL_MS = 10000;           // 10 seconds
 

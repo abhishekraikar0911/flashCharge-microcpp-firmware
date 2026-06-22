@@ -129,7 +129,17 @@ void SafetyService::pollSafetyLimits(const StateSnapshot& snap) {
 
     // BMS Safety Flag
     if (now - _lastBmsSafetyCheck >= 100) {
-        if (snap.bmsSafeToCharge != _lastBmsSafe) {
+
+        if (snap.lastBMS == 0) {
+            // ── Boot Guard: No BMS frame received yet ──────────────────────
+            // lastBMS==0 means the BMS CAN bus hasn't sent a single frame since
+            // boot. _lastBmsSafe is initialized to 'true' in the header, so the
+            // first poll() would falsely see a state change (true→false) and
+            // fire BMS_SWITCH_OFF before any vehicle is even connected.
+            // Solution: silently sync the baseline without triggering any alert.
+            _lastBmsSafe = snap.bmsSafeToCharge;
+
+        } else if (snap.bmsSafeToCharge != _lastBmsSafe) {
             if (!snap.bmsSafeToCharge) {
                 // ── Byte 5 of 0x1806E5F4 just went to 0x01 (charger switch OFF) ──
                 // Disambiguate: SOC==100% is normal charge completion.

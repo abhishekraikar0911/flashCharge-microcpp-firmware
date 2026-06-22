@@ -189,9 +189,9 @@ void processDebugCommand(char c) {
             SafeSerial::setSuppressed(false); // Briefly unsuppress for logs
             Serial.println("\n[NVS] ✅ Confirmed — clearing all NVS credentials...");
             SecureConfig::factoryReset();
-            Serial.println("[NVS] 🔧 Launching provisioning wizard...");
+            Serial.println("[NVS] 🔧 Launching zero-touch auto-provisioner...");
             
-            // The wizard handles its own suppression
+            // The auto-provisioner handles its own suppression
             Provisioning::enterProvisioningMode(); // blocks, then restarts ESP32
         } else {
             // Cancelled: Unsuppress logs

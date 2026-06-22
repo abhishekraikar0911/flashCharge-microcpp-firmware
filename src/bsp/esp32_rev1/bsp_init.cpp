@@ -72,8 +72,8 @@ static Esp32MCP2515      s_can2(CAN2_CS_PIN, MCP_8MHZ, CAN2_INT_PIN);
 static FlashConfig       s_config(s_flash);
 
 // ---- Device Drivers ----
-static SingleRelay       s_relay(s_gpio, GPIO_RELAY_PIN, true);          // Active HIGH contactor
-static NtcSensor         s_tempSensor(s_gpio, GPIO_NTC_ADC_PIN);         // NTC thermistor
+//static SingleRelay       s_relay(s_gpio, GPIO_RELAY_PIN, true);          // Active HIGH contactor
+//static NtcSensor         s_tempSensor(s_gpio, GPIO_NTC_ADC_PIN);         // NTC thermistor
 static A7670ModemDriver  s_modem(s_modemUart, s_gpio, s_timer, GSM_RESET_PIN);
 static DalyBmsDriver     s_bms(s_can2, s_timer, s_logger);
 static CM1ChargerDriver  s_charger(s_can1, s_timer, s_logger);
@@ -92,7 +92,7 @@ bool BSP_Init() {
     g_app.charger    = &s_charger;
     g_app.bms        = &s_bms;
     g_app.modem      = &s_modem;
-    g_app.relay      = &s_relay;
+    //g_app.relay      = &s_relay;
     g_app.gpio       = &s_gpio;
     g_app.tempSensor = nullptr; // Not populated
 
@@ -131,7 +131,7 @@ bool BSP_Init() {
     s_modemUart.begin(GSM_BOOT_BAUD);
 
     // ---- Step 7: Relay ----
-    s_relay.init();
+ //   s_relay.init();
 
     // ---- Step 8: Device Drivers base init ----
     s_bms.init();

@@ -4,34 +4,93 @@
 #include "config/WssConfig.h"
 #include "config/secure_config.h"
 #include "system/SafeSerial.h"
+#include <WiFi.h>
 
 void Provisioning::enterProvisioningMode() {
-    // Silence all background SafeSerial logging so the wizard prompt is readable
+    // Silence all background SafeSerial logging so the summary is readable
     SafeSerial::setSuppressed(true);
     delay(50); // let any in-flight prints finish
 
     Serial.println("\n\n╔════════════════════════════════════════╗");
-    Serial.println("║   PROVISIONING MODE ACTIVATED          ║");
-    Serial.println("║   Secure Credential Setup              ║");
+    Serial.println("║   ZERO-TOUCH PROVISIONING RUNNING      ║");
+    Serial.println("║   Auto-configuring MAC ID & Defaults   ║");
     Serial.println("╚════════════════════════════════════════╝\n");
-    runProvisioningWizard();
+    
+    autoProvisionDevice();
 }
 
 bool Provisioning::isProvisioningRequired() {
-    return !SecureCredentials::g_secureCredentials.hasCredentials();
+    // Check 1: No credentials at all → definitely need provisioning
+    if (!SecureCredentials::g_secureCredentials.hasCredentials()) {
+        return true;
+    }
+
+    // Check 2: Credentials exist but Charger ID doesn't match hardware MAC
+    // This handles the migration from old manually-set IDs to new MAC-based IDs.
+    char storedId[48] = "";
+    char host[128]    = "";
+    char url[256]     = "";
+    uint16_t port     = 0;
+    SecureConfig::getOCPPConfig(host, port, storedId, url,
+                                sizeof(host), sizeof(storedId), sizeof(url));
+
+    // Generate the expected MAC-based ID
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    mac.toUpperCase();
+
+    if (mac != String(storedId)) {
+        Serial.printf("[NVS] ⚠️  Charger ID mismatch!\n");
+        Serial.printf("[NVS]  Stored : %s\n", storedId);
+        Serial.printf("[NVS]  MAC ID : %s\n", mac.c_str());
+        Serial.println("[NVS] Triggering re-provisioning to update to MAC-based ID...");
+        return true;
+    }
+
+    return false;
 }
 
-void Provisioning::runProvisioningWizard() {
-    Serial.println("This wizard will securely store your credentials in encrypted NVS.\n");
+void Provisioning::autoProvisionDevice() {
+    Serial.println("[NVS] No credentials found. Initiating Auto-Provisioning...");
+
+    // 1. Generate MAC-based Charger ID
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    mac.toUpperCase();
+    String chargerId = mac;
     
-    promptWiFiCredentials();
-    promptOCPPCredentials();
-    promptGSMCredentials();
-    promptCertificates();
+    // 2. Set Default CSMS Host
+    String serverHost = "ocpp.rivotmotors.com";
+    uint16_t port = 443;
     
-    Serial.println("\n✅ Provisioning complete! Credentials stored securely.");
-    Serial.println("⚠️  Remove any hardcoded credentials from secrets.h");
-    Serial.println("🔄 Restarting in 3 seconds...\n");
+    // 3. Set Universal Fallback WiFi
+    String fallbackSsid = "NX100";
+    String fallbackPass = ""; // Open network
+    
+    // 4. Set Default GSM APN
+    String defaultApn = "";   // Auto-negotiate for most Indian SIMs
+    
+    // --- Store in NVS ---
+    bool success = true;
+    
+    if (!SecureCredentials::g_secureCredentials.storeWiFiCredentials(fallbackSsid.c_str(), fallbackPass.c_str())) success = false;
+    if (!SecureCredentials::g_secureCredentials.storeOCPPCredentials(serverHost.c_str(), port, chargerId.c_str())) success = false;
+    SecureConfig::storeGSMCredentials(defaultApn.c_str(), "", "");
+    
+    WSSConfig::init(); // Initialize default certs
+
+    if (success) {
+        Serial.println("\n✅ Auto-Provisioning Complete! Device is ready.");
+        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        Serial.printf (" Charger ID : %s\n", chargerId.c_str());
+        Serial.printf (" CSMS URL   : wss://%s:%d\n", serverHost.c_str(), port);
+        Serial.printf (" Fallback AP: %s (Open)\n", fallbackSsid.c_str());
+        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    } else {
+        Serial.println("\n❌ FAILED to write to NVS. Hardware issue?");
+    }
+    
+    Serial.println("🔄 Restarting in 3 seconds to apply configuration...\n");
     
     // Safely close the NVS journal then restore logging before restart
     SecureCredentials::g_secureCredentials.close();
@@ -39,136 +98,4 @@ void Provisioning::runProvisioningWizard() {
     
     delay(3000);
     ESP.restart();
-}
-
-void Provisioning::promptWiFiCredentials() {
-    Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.println("📶 WiFi Configuration");
-    Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    
-    String ssid = readSerialInput("Enter WiFi SSID: ", false);
-    String password = readSerialInput("Enter WiFi Password: ", false);
-    
-    if (SecureCredentials::g_secureCredentials.storeWiFiCredentials(ssid.c_str(), password.c_str())) {
-        Serial.println("✅ WiFi credentials stored\n");
-    } else {
-        Serial.println("❌ Failed to store WiFi credentials\n");
-    }
-}
-
-void Provisioning::promptOCPPCredentials() {
-    Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.println("🔌 OCPP Configuration");
-    Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    
-    String chargerId = readSerialInput("Enter Charger ID: ", false);
-    String serverHost = readSerialInput("Enter OCPP Server Host (e.g. ocpp.rivotmotors.com): ", false);
-    String serverPortStr = readSerialInput("Enter OCPP Port (default 443): ", false);
-    uint16_t port = serverPortStr.length() > 0 ? serverPortStr.toInt() : 443;
-    
-    if (SecureCredentials::g_secureCredentials.storeOCPPCredentials(serverHost.c_str(), port, chargerId.c_str())) {
-        Serial.println("✅ OCPP credentials stored\n");
-    } else {
-        Serial.println("❌ Failed to store OCPP credentials\n");
-    }
-}
-
-void Provisioning::promptCertificates() {
-    Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.println("🔐 TLS Certificate Configuration");
-    Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.println("Use default CA certificate? (y/n): ");
-    
-    String useDefault = readSerialInput("", false);
-    if (useDefault.equalsIgnoreCase("n")) {
-        Serial.println("⚠️  Custom certificate upload not implemented in this version");
-        Serial.println("   Use WSSConfig::setCACertificate() in code for now");
-    }
-    
-    WSSConfig::init();
-    Serial.println("✅ Using default CA certificate\n");
-}
-
-void Provisioning::promptGSMCredentials() {
-    clearSerialBuffer();  // flush any leftover \n from previous step
-    delay(100);
-
-    Serial.println("----------------------------------------");
-    Serial.println("[GSM / SIM Configuration]");
-    Serial.println("----------------------------------------");
-    Serial.println("Common APNs: airtelgprs.com | jionet | vi.gprs | bsnlnet");
-    Serial.println("(Leave Username/Password blank for most Indian SIMs)");
-    Serial.println();
-
-    String apn  = readSerialInput("Enter SIM APN          : ", false);
-    String user = readSerialInputOptional("Enter APN Username     : ");
-    String pass = readSerialInputOptional("Enter APN Password     : ");
-
-    if (apn.length() > 0) {
-        SecureConfig::storeGSMCredentials(apn.c_str(), user.c_str(), pass.c_str());
-        Serial.println("[OK] GSM credentials stored\n");
-    } else {
-        Serial.println("[SKIP] No APN entered — using compile-time default\n");
-    }
-}
-
-String Provisioning::readSerialInput(const char* prompt, bool hideInput) {
-    Serial.print(prompt);
-    clearSerialBuffer();
-    
-    String input = "";
-    while (true) {
-        if (Serial.available()) {
-            char c = Serial.read();
-            if (c == '\n' || c == '\r') {
-                if (input.length() > 0) {
-                    Serial.println();
-                    break;
-                }
-            } else if (c == 127 || c == 8) { // Backspace
-                if (input.length() > 0) {
-                    input.remove(input.length() - 1);
-                    Serial.print("\b \b");
-                }
-            } else {
-                input += c;
-                Serial.print(hideInput ? '*' : c);
-            }
-        }
-        delay(10);
-    }
-    return input;
-}
-
-// Accepts empty input (user presses Enter immediately) — used for optional fields
-String Provisioning::readSerialInputOptional(const char* prompt) {
-    Serial.print(prompt);
-    clearSerialBuffer();
-    String input = "";
-    uint32_t start = millis();
-    while (millis() - start < 30000) {  // 30s timeout
-        if (Serial.available()) {
-            char c = Serial.read();
-            if (c == '\n' || c == '\r') {
-                Serial.println();
-                break;  // accept empty
-            } else if (c == 127 || c == 8) {
-                if (input.length() > 0) {
-                    input.remove(input.length() - 1);
-                    Serial.print("\b \b");
-                }
-            } else {
-                input += c;
-                Serial.print(c);
-            }
-        }
-        delay(10);
-    }
-    return input;
-}
-
-void Provisioning::clearSerialBuffer() {
-    while (Serial.available()) {
-        Serial.read();
-    }
 }

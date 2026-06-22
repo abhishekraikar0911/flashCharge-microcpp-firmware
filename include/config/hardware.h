@@ -112,6 +112,7 @@
 #define TASK_STACK_SIZE_CAN_RX 6144       // Increased from 4096 — proven stable
 #define TASK_STACK_SIZE_CHARGER_COMM 6144  // Increased from 4096 — prevents stack overflow
 #define TASK_STACK_SIZE_UI 4096
+#define TASK_STACK_SIZE_HW_SVC 8192        // Doubled from 4096 — watermark was at 1424 words (too tight)
 #define TASK_STACK_SIZE_OCPP 40960         // 40KB: 24KB base + ~16KB for SSLClient/mbedTLS during GSM OTA download
 #define TASK_STACK_SIZE_WATCHDOG 2048
 #define TASK_STACK_SIZE_NETWORK 8192       // GSM/WiFi state machine + TLS

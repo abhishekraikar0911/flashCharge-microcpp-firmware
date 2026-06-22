@@ -10,16 +10,9 @@ class Provisioning {
 public:
     static void enterProvisioningMode();
     static bool isProvisioningRequired();
-    static void runProvisioningWizard();
-    
+
 private:
-    static void promptWiFiCredentials();
-    static void promptOCPPCredentials();
-    static void promptGSMCredentials();
-    static void promptCertificates();
-    static String readSerialInput(const char* prompt, bool hideInput = false);
-    static String readSerialInputOptional(const char* prompt);
-    static void clearSerialBuffer();
+    static void autoProvisionDevice();
 };
 
 #endif

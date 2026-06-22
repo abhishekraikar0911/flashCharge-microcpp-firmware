@@ -75,6 +75,22 @@ namespace ocpp
     void sendSystemAlert(const char* alertType, const char* message, const char* severity = "Warning");
 
     /**
+     * Send a structured hardware fault to the CSMS via DataTransfer "HardwareFault".
+     * Faults are things visible in the field: modem dead, CAN bus broken, crash loops.
+     * @param code        Short fault identifier, e.g. "CAN_TX_FAIL"
+     * @param description Human-readable explanation for the admin panel
+     * @param severity    FAULT_SEV_INFO(0) / WARNING(1) / CRITICAL(2)
+     */
+    void sendHardwareFault(const char* code, const char* description, uint8_t severity = 2);
+
+    /**
+     * Drain the FaultQueue and send any pending hardware faults.
+     * Called from the OCPP task loop every second — safe to call frequently.
+     * Will only send if OCPP is operative (WebSocket connected + BootNotification done).
+     */
+    void drainFaultQueue();
+
+    /**
      * Send charger readiness status to user (before RemoteStart)
      * Shows if charger is ready or has any blocking issues
      */

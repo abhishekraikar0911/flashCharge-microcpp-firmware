@@ -48,8 +48,16 @@ static void ocppTaskLoop(void *pvParameters)
         ocpp::poll();
         g_healthMonitor.feed();
 
-        // Log stack high-water mark every 60s — OCPP/TLS is the heaviest stack user
         uint32_t now = millis();
+
+        // Drain hardware fault queue — sends one PendingFault per second via DataTransfer
+        static uint32_t lastFaultDrain = 0;
+        if (now - lastFaultDrain >= 1000u) {
+            lastFaultDrain = now;
+            ocpp::drainFaultQueue();
+        }
+
+        // Log stack high-water mark every 60s — OCPP/TLS is the heaviest stack user
         if (now - lastWatermarkLog >= 60000u) {
             lastWatermarkLog = now;
             if (!SafeSerial::isSuppressed()) {

@@ -11,6 +11,8 @@
 #include "config/hardware.h"
 #include "system/SafeSerial.h"
 #include "services/safety/HealthMonitor.h" // g_healthMonitor.feed() — required inside NTP wait loop
+#include "system/FaultQueue.h"             // Hardware fault drain
+#include "system/CrashForensics.h"         // Activity tracking + heap low-water mark
 
 #include "services/ocpp/OcppClient.h"
 #include "config/production_config.h"
@@ -532,19 +534,46 @@ bool ocpp::init()
             
             // Allow MicroOcpp to transition to "Installing" before rebooting
             fwService->setOnInstall([](const char* location) -> bool {
-                // STAGE 2 FAILSAFE: Prevent Reboot While Plugged In
-                if (SystemState::instance().getGunPhysicallyConnected() || SystemState::instance().getTransactionActive()) {
-                    Serial.println("[OTA] ❌ INSTALLATION REJECTED: Vehicle is plugged in or charging. Safety lock engaged.");
-                    return false; // Tells MicroOcpp to abort the install phase
+
+                // ── Post-deferred-reboot guard ────────────────────────────
+                // After a deferred reboot, _updateValid is false (RAM cleared).
+                // But OTA_SUCCESS was recorded in NVS. MicroOcpp re-fires the
+                // install callback because it's still in "Installing" state.
+                // We return true so MicroOcpp can detect version change via
+                // setBuildNumber() and send FirmwareStatusNotification: Installed.
+                if (prod::OTAManager::checkUpdateSuccess()) {
+                    Serial.println("[OTA] ✅ Post-reboot: OTA already applied. "
+                                   "Returning true for MicroOcpp Installed transition.");
+                    g_persistence.recordLastError("BOOT_NORMAL"); // Clear flag
+                    return true;
+                }
+
+                // ── Safety check: gun plugged or session active ──────────
+                // Instead of rejecting (which locks the charger in Unavailable
+                // forever), we defer: set a flag and return true so MicroOcpp
+                // sends "Installing". hw_svc_task will reboot once gun unplugs.
+                if (SystemState::instance().getGunPhysicallyConnected() ||
+                    SystemState::instance().getTransactionActive()) {
+
+                    Serial.println("[OTA] ⏳ INSTALL DEFERRED: Vehicle connected. "
+                                   "Will reboot automatically when gun is unplugged.");
+                    
+                    // Notify CSMS so admin knows the charger is waiting
+                    FaultQueue::push("OTA_DEFERRED",
+                        "OTA install deferred: vehicle is physically connected. "
+                        "Charger will reboot and apply firmware when gun is unplugged.",
+                        FAULT_SEV_WARNING);
+                } else {
+                    Serial.println("[OTA] ⏳ MicroOcpp queued 'Installing'. Handing over to hw_svc_task for reboot.");
                 }
 
                 if (prod::OTAManager::isUpdateValid()) {
-                    Serial.println("[OTA] ⏳ MicroOcpp queued 'Installing'. Rebooting in 20 seconds to allow status flush...");
-                    xTaskCreate([](void* pvParameters) {
-                        vTaskDelay(pdMS_TO_TICKS(20000));
-                        ESP.restart();
-                        vTaskDelete(NULL);
-                    }, "OtaRebootTask", 2048, NULL, 1, NULL);
+                    // ZERO ALLOCATION ARCHITECTURE:
+                    // Instead of creating a new OtaRebootTask (which starves if priority is too low 
+                    // or panics if heap is fragmented), we simply flag the reboot.
+                    // The highly-reliable hw_svc_task (Priority 3) checks this flag every 5 seconds 
+                    // and will execute the ESP.restart() safely.
+                    prod::OTAManager::setDeferredReboot(true);
                     return true;
                 } else {
                     Serial.println("[OTA] ❌ Firmware valid flag not set, aborting installation phase.");
@@ -664,8 +693,13 @@ void ocpp::poll()
     // ═══════════════════════════════════════════════════════════════
     int currentStatus = (int)getChargePointStatus(1);
     
+    static bool vehicleInfoSentForCurrentState = false;
+    static unsigned long lastVehicleInfoAttempt = 0;
+
     if (currentStatus != lastReportedStatus && currentStatus > 0) {
         lastReportedStatus = currentStatus;
+        vehicleInfoSentForCurrentState = false; // Reset on every state change
+
         const char* statusNames[] = {
             "UNDEFINED", "Available", "Preparing", "Charging", 
             "SuspendedEVSE", "SuspendedEV", "Finishing", 
@@ -673,41 +707,52 @@ void ocpp::poll()
         };
         const char* name = (currentStatus >= 0 && currentStatus <= 9) ? statusNames[currentStatus] : "UNKNOWN";
         Serial.printf("\n[OCPP_STATE] 🔄 Status changed to: %s\n\n", name);
+    }
 
-        // State-based triggers for VehicleInfo: Send exactly on state transitions
-        if (currentStatus == ChargePointStatus_Preparing || currentStatus == ChargePointStatus_Finishing) {
+    // Polled-retry logic for VehicleInfo: Send exactly once per state, but wait for BMS readiness
+    if (!vehicleInfoSentForCurrentState && 
+        (currentStatus == ChargePointStatus_Preparing || currentStatus == ChargePointStatus_Finishing)) {
+        
+        if (millis() - lastVehicleInfoAttempt >= 3000) {
+            lastVehicleInfoAttempt = millis();
             auto snap = state.snapshot();
-            if (snap.gunPhysicallyConnected || snap.batteryConnected) {
-                uint8_t vehicleModel = 1;
-                float capacityAh = 30.0f; // Classic
+            
+            // Wait until BMS data is valid (Imax > 0) and we are online before attempting to send.
+            if ((snap.gunPhysicallyConnected || snap.batteryConnected) && snap.BMS_Imax > 0.0f && ocpp::isConnected()) {
+                
+                // If handshake guard is active, delay marking it sent so it retries
+                if (!(snap.transactionActive && snap.activeTransactionId <= 0)) {
+                    uint8_t vehicleModel = 1;
+                    float capacityAh = 30.0f; // Classic
 
-                if (snap.BMS_Imax >= 60.0f) {
-                    vehicleModel = 3; // Max
-                    capacityAh = 90.0f;
-                }
-                else if (snap.BMS_Imax >= 30.0f) {
-                    vehicleModel = 2; // Pro
-                    capacityAh = 60.0f;
-                }
-
-                // Range = (Capacity * SOC) * 2.7 km/Ah
-                float estimatedRange = capacityAh * (snap.socPercent / 100.0f) * 2.7f;
-
-                // Get VIN dynamically from NVS or fallback to default
-                Preferences prefs;
-                String vinStr = "ME9NP1411H2172005"; // Default
-                // Open in read/write mode (false) so it creates the namespace silently if NOT_FOUND
-                if (prefs.begin("config", false)) {
-                    // Check if key exists first to avoid the verbose ESP32 error log:
-                    // "[E][Preferences.cpp:483] getString(): nvs_get_str len fail: vin NOT_FOUND"
-                    if (prefs.isKey("vin")) {
-                        String stored = prefs.getString("vin", "");
-                        if (stored.length() > 0) vinStr = stored;
+                    if (snap.BMS_Imax >= 60.0f) {
+                        vehicleModel = 3; // Max
+                        capacityAh = 90.0f;
                     }
-                    prefs.end();
-                }
+                    else if (snap.BMS_Imax >= 30.0f) {
+                        vehicleModel = 2; // Pro
+                        capacityAh = 60.0f;
+                    }
 
-                ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, vinStr.c_str());
+                    // Range = (Capacity * SOC) * 2.7 km/Ah
+                    float estimatedRange = capacityAh * (snap.socPercent / 100.0f) * 2.7f;
+
+                    // Get VIN dynamically from NVS or fallback to default
+                    Preferences prefs;
+                    String vinStr = "ME9NP1411H2172005"; // Default
+                    // Open in read/write mode (false) so it creates the namespace silently if NOT_FOUND
+                    if (prefs.begin("config", false)) {
+                        if (prefs.isKey("vin")) {
+                            String stored = prefs.getString("vin", "");
+                            if (stored.length() > 0) vinStr = stored;
+                        }
+                        prefs.end();
+                    }
+
+                    ocpp::sendVehicleInfo(snap.socPercent, snap.BMS_Imax, snap.terminalVolt, snap.terminalCurr, snap.chargerTemp, vehicleModel, estimatedRange, vinStr.c_str());
+                    
+                    vehicleInfoSentForCurrentState = true; // Mark as successfully queued
+                }
             }
         }
     }
@@ -893,18 +938,38 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
     Serial.printf("\n[OCPP] 📤 Sending VehicleInfo (%s):\n", stateLabel);
     Serial.printf("  SOC=%.1f%% | Model=%s | Range=%.1fkm | MaxI=%.1fA | VIN=%s\n", soc, modelName, range, maxCurrent, vin);
 
+    // ── Forensics: track this as the active operation ────────────────────
+    // If a crash occurs during JSON serialisation or DataTransfer queueing,
+    // the crash report will show lastActivity=SEND_VEHICLE_INFO instead of
+    // TLS_CONNECT, which strongly points to Theory B (heap corruption).
+    CrashForensics::setActivity(CrashForensics::ACT_SEND_VEHICLE_INFO);
+    CrashForensics::updateHeap();  // capture heap BEFORE serialisation
+    CrashForensics::persist();
+
     vehicleInfoPending = true;  // Mark as pending BEFORE queuing
     pendingSince = millis();
 
+    // ── VIN OWNERSHIP FIX ───────────────────────────────────────────
+    // BEFORE: `vin` was captured as `const char*` (raw pointer) in the
+    // MicroOcpp-deferred lambda. By the time MicroOcpp calls the builder,
+    // the caller's `vinStr` Arduino String had been destroyed. The dangling
+    // pointer then read live OCPP message buffer memory, producing:
+    //   "vin": "[2,\"fb1dbdfb-936c..."   ← actual OCPP WebSocket frame
+    //
+    // AFTER: We copy `vin` into a `std::string` on the heap NOW, before the
+    // lambda is stored. The lambda captures `vinCopy` by VALUE, so it owns
+    // its own allocation that outlives the caller's stack frame.
+    std::string vinCopy(vin);  // heap-allocated copy, owned by the lambda
+
     sendRequest("DataTransfer",
-        [soc, maxCurrent, model, range, modelName, vin]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
+        [soc, maxCurrent, model, range, modelName, vinCopy]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
             MicroOcpp::JsonDoc dataDoc(256);
             JsonObject dataObj = dataDoc.to<JsonObject>();
             dataObj["soc"] = soc;
             dataObj["maxCurrent"] = maxCurrent;
             dataObj["model"] = modelName;
             dataObj["range"] = range;
-            dataObj["vin"] = vin;
+            dataObj["vin"] = vinCopy.c_str();   // safe: std::string is owned by lambda
             dataObj["timestamp"] = millis();
             
             String dataStr;
@@ -919,6 +984,8 @@ void ocpp::sendVehicleInfo(float soc, float maxCurrent, float voltage, float cur
         },
         [](JsonObject response) {
             vehicleInfoPending = false;  // Clear pending flag — ready for next send
+            CrashForensics::setActivity(CrashForensics::ACT_IDLE);
+            CrashForensics::persist();
         }
     );
 }
@@ -1087,4 +1154,83 @@ void ocpp::sendChargerStatus(bool ready, const char* reason)
             Serial.printf("[OCPP] ✅ ChargerStatus acknowledged\n");
         }
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// sendHardwareFault — immediate DataTransfer for real hardware problems
+// ═══════════════════════════════════════════════════════════════════════
+// messageId is severity-dependent:
+//   Critical / Warning  →  "HardwareFault"    (shows as fault in Admin UI)
+//   Info                →  "DeviceDiagnostic" (boot report, not a fault)
+void ocpp::sendHardwareFault(const char* code, const char* description, uint8_t severity)
+{
+    OcppLock lock;
+    if (!lock.ok()) return;
+
+    const char* sevStr = (severity >= 2) ? "Critical" :
+                         (severity == 1) ? "Warning" : "Info";
+
+    // Use a distinct messageId for informational diagnostics so they don't
+    // appear as hardware faults in the CSMS Admin UI.
+    const char* msgId  = (severity >= 1) ? "HardwareFault" : "DeviceDiagnostic";
+
+    Serial.printf("[FAULT] 📡 DataTransfer/%s [%s]: %s — %s\n", msgId, sevStr, code, description);
+
+    // Capture by String value (not const char*) — guards against dangling pointers
+    // if MicroOcpp defers the builder lambda beyond the caller's stack frame.
+    String codeStr(code);
+    String descStr(description);
+    String sevStrObj(sevStr);
+    String msgIdStr(msgId);
+
+    sendRequest("DataTransfer",
+        [codeStr, descStr, sevStrObj, msgIdStr]() -> std::unique_ptr<MicroOcpp::JsonDoc> {
+            // Inner data JSON
+            MicroOcpp::JsonDoc dataDoc(384);
+            JsonObject dataObj = dataDoc.to<JsonObject>();
+            dataObj["faultCode"]       = codeStr.c_str();
+            dataObj["description"]     = descStr.c_str();
+            dataObj["severity"]        = sevStrObj.c_str();
+            dataObj["uptimeMs"]        = (uint32_t)millis();
+            dataObj["firmwareVersion"] = FIRMWARE_VERSION;
+
+            String dataStr;
+            serializeJson(dataObj, dataStr);
+
+            // Outer OCPP DataTransfer wrapper
+            auto doc = std::unique_ptr<MicroOcpp::JsonDoc>(new MicroOcpp::JsonDoc(640));
+            JsonObject payload = doc->to<JsonObject>();
+            payload["vendorId"]  = "RivotMotors";
+            payload["messageId"] = msgIdStr.c_str();
+            payload["data"]      = dataStr;
+            return doc;
+        },
+        [codeStr, msgIdStr](JsonObject response) {
+            Serial.printf("[FAULT] ✅ %s [%s] acknowledged by CSMS\n",
+                          msgIdStr.c_str(), codeStr.c_str());
+        }
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// drainFaultQueue — called from OCPP task loop every second
+// Sends pending hardware faults one-at-a-time once OCPP is operative.
+// ═══════════════════════════════════════════════════════════════════════
+void ocpp::drainFaultQueue()
+{
+    if (!FaultQueue::hasItems()) return;
+
+    // Only drain when OCPP is operative
+    {
+        OcppLock lock(200);
+        if (!lock.ok()) return;
+        if (!isOperative()) return;
+        // lock released here at end of scope
+    }
+
+    // Pop one fault and send it — sendHardwareFault() takes its own fresh lock
+    PendingFault f;
+    if (FaultQueue::pop(f)) {
+        sendHardwareFault(f.code, f.description, f.severity);
+    }
 }

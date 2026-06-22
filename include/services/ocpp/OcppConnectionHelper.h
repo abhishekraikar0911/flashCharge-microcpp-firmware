@@ -75,6 +75,13 @@ namespace prod {
         uint32_t _lastGsmPing = 0;
         uint32_t _lastConnectAttempt = 0;
         SSLClient* _sslClient = nullptr;
+
+        // ── Post-OTA Cooldown ──
+        // After OTA download ends, the modem is exhausted.
+        // We track when OTA mode cleared and enforce a 15s rest
+        // before attempting TLS reconnect, preventing task WDT crash.
+        bool _lastOtaActive = false;
+        uint32_t _otaClearedAt = 0;
     };
 
 } // namespace prod

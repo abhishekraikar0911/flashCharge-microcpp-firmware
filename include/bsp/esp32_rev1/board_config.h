@@ -28,17 +28,19 @@
 // ========== GSM MODEM CONFIGURATION ==========
 #define GPIO_GSM_TX     17
 #define GPIO_GSM_RX     16
-#define GPIO_GSM_RESET  23
+#define GPIO_GSM_RESET  27
 
 // ========== LED AND INTERFACE CONFIGURATION ==========
-#define GPIO_LED_CHARGER 4     // Charging
+#define GPIO_LED_CHARGER 4     // Charging (Reverted to fixed hardware pin)
 #define GPIO_LED_NETWORK 15    // Server Connection
-#define GPIO_BTN_ESTOP   32
-#define GPIO_BTN_REBOOT  35
-#define GPIO_BTN_START   33    // Confirmed
-#define GPIO_BTN_STOP    26    // Confirmed
 #define GPIO_LED_FAULT   13    // Fault Detection
 
-// ========== CONTACTOR & SENSORS ==========
-#define GPIO_RELAY_PIN      14    // MOVED: GPIO 4 is Fault LED. Is this on 14 or 12?
-#define GPIO_NTC_ADC_PIN    39    // MOVED: GPIO 33 is Start Button. Production uses 39.
+// #define GPIO_BTN_ESTOP   32    // Unused (Freed for I2C)
+// #define GPIO_BTN_REBOOT  35    // Unused
+#define GPIO_BTN_START   33    // Confirmed
+#define GPIO_BTN_STOP    26    // Confirmed
+
+// ========== RFID / NFC (PN532) ==========
+//#define GPIO_I2C_SDA        0     // Safe for I2C pull-ups    (for RFID Integration)
+//#define GPIO_I2C_SCL        32    // Safe for I2C pull-ups (Freed from ESTOP)
+// #define GPIO_NTC_ADC_PIN    39 // Unused

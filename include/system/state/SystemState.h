@@ -35,29 +35,31 @@ enum class StopReason : uint8_t {
     FAULT           = 5,  // BMS voltage out-of-range
     CAN_TIMEOUT     = 6,  // Charger module CAN lost (HAL hasFault)
     NETWORK_LOSS    = 7,  // GSM/WiFi offline >30 s during charge
-    POWER_RESTART   = 8,  // ESP32 rebooted (WDT/panic/brownout)
+    POWER_RESTART   = 8,  // ESP32 unexpected reboot (WDT/panic/brownout)
     UNKNOWN         = 9,  // Catch-all for library-driven stops
     BMS_SWITCH_OFF  = 10, // BMS MOSFET protection trip mid-charge (SOC < 100%)
     BMS_FULL_CHARGE = 11, // BMS stopped charging because SOC reached 100%
     LOCAL_BUTTON    = 12, // Physical STOP button (GPIO 26) pressed by operator
+    SOFT_RESET      = 13, // Intentional software reboot (OCPP Reset.req soft / OTA)
 };
 
 // Returns a human-readable string for a StopReason value.
 static inline const char* stopReasonStr(StopReason r) {
     switch (r) {
-        case StopReason::REMOTE:         return "Remote";
-        case StopReason::LOCAL_BUTTON:   return "Local (Button)";
-        case StopReason::EMERGENCY_STOP: return "EmergencyStop";
-        case StopReason::BMS_TIMEOUT:    return "BMS Timeout";
-        case StopReason::OVERTEMP:       return "OverTemp";
-        case StopReason::FAULT:          return "Fault";
-        case StopReason::CAN_TIMEOUT:    return "CAN Timeout";
-        case StopReason::NETWORK_LOSS:   return "Network Loss";
-        case StopReason::POWER_RESTART:  return "PowerLoss";          // OCPP 1.6 standard value
+        case StopReason::REMOTE:          return "Remote";
+        case StopReason::LOCAL_BUTTON:    return "Local (Button)";
+        case StopReason::EMERGENCY_STOP:  return "EmergencyStop";
+        case StopReason::BMS_TIMEOUT:     return "BMS Timeout";
+        case StopReason::OVERTEMP:        return "OverTemp";
+        case StopReason::FAULT:           return "Fault";
+        case StopReason::CAN_TIMEOUT:     return "CAN Timeout";
+        case StopReason::NETWORK_LOSS:    return "Network Loss";
+        case StopReason::POWER_RESTART:   return "PowerLoss";   // OCPP 1.6: unexpected reboot
+        case StopReason::SOFT_RESET:      return "SoftReset";   // OCPP 1.6: intentional restart
         case StopReason::BMS_SWITCH_OFF:  return "BMS Charger Switch OFF (Fault)";
-        case StopReason::BMS_FULL_CHARGE:  return "Charge Complete (SOC=100%)";
-        case StopReason::UNKNOWN:          return "Unknown";
-        default:                           return "None";
+        case StopReason::BMS_FULL_CHARGE: return "Charge Complete (SOC=100%)";
+        case StopReason::UNKNOWN:         return "Unknown";
+        default:                          return "None";
     }
 }
 

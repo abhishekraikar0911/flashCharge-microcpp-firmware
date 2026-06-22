@@ -124,6 +124,7 @@ namespace prod {
 
         // ── Internal Helpers ──
         bool waitForAT(uint32_t timeoutMs = 10000);
+        void yieldDelay(uint32_t ms);   // WDT-safe delay: feeds watchdog + yields to FreeRTOS
         void setState(GSMState newState);
 
         // ── TinyGSM Objects ──
